@@ -13,13 +13,12 @@ from typing import Any, Dict
 from urllib.parse import parse_qs, unquote_plus, urlparse
 
 import requests
+from asn1crypto import core, x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates
 from requests.adapters import HTTPAdapter
-
-from asn1crypto import core, x509 
-from cryptography.hazmat.primitives import hashes 
-from cryptography.hazmat.primitives.asymmetric import padding 
-from cryptography.hazmat.primitives.serialization import Encoding 
-from cryptography.hazmat.primitives.serialization.pkcs12 import load_key_and_certificates 
 
 # ------------------------ Config ------------------------
 PJE_VERSION = "2.5.16"
@@ -29,7 +28,10 @@ SUCCESS_CODES = {200, 201, 202, 204, 302, 304}
 
 log = logging.getLogger("pjeoffice")
 if not log.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+      level=logging.INFO, 
+      format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+      )
 
 # ------------------------ GIFs 1×1 e 2×1 ----------------
 GIF_OK = base64.b64decode("R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==")
@@ -95,7 +97,11 @@ class PKCS12Token:
     def sign(self, phrase: str, algorithm: str) -> str:
         if self._key is None:
             raise RuntimeError("token not logged in")
-        signature = self._key.sign(phrase.encode("utf-8"), padding.PKCS1v15(), self._digest_for(algorithm))
+        signature = self._key.sign(
+          phrase.encode("utf-8"), 
+          padding.PKCS1v15(), 
+          self._digest_for(algorithm)
+          )
         return base64.b64encode(signature).decode("ascii")
 
     def certificate_chain_pkipath64(self) -> str:

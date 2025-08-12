@@ -1,0 +1,3 @@
+build/
+certificate/**.pfx
+pjeoffice_headless.egg-info
