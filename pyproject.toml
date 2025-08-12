@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pjeoffice-headless"
+version = "1.0.0"
+description = "Autenticador headless do PJe Office: HTTP local que assina desafios com certificado PKCS#12 (A1)."
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [{ name = "Matheus Munhoz" }]
+dependencies = [
+  "requests>=2.31",
+  "cryptography>=42",
+  "asn1crypto>=1.5.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.4",
+  "mypy>=1.7",
+  "types-requests",
+]
+
+[tool.setuptools]
+# O projeto é um único módulo: pjeoffice_headless.py na raiz do repositório
+py-modules = ["pjeoffice_headless"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_ignores = true

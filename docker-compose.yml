@@ -1,0 +1,14 @@
+services:
+  pjeoffice-headless:
+    build: .
+    image: pjeoffice-headless:0.1.0
+    container_name: pjeoffice-headless
+    environment:
+      PJE_CERT_PATH: /certs/cert.pfx
+      PJE_CERT_PASS: "sua-senha-aqui"
+      PJE_PORT: "8800"
+    volumes:
+      - ./secrets/24853997.pfx:/certs/cert.pfx:ro
+    ports:
+      - "127.0.0.1:8800:8800"
+    restart: unless-stopped
