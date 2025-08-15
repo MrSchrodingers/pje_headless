@@ -4,7 +4,7 @@
 ![Status](https://img.shields.io/badge/status-alpha-yellow)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![Dockerized](https://img.shields.io/badge/docker-ready-blue)
-![CNJ](https://img.shields.io/badge/CNJ-PJeOffice_Pro-reference-informational)
+<img src="https://www.cnj.jus.br/wp-content/uploads/2023/09/logo-cnj-portal-20-09-1.svg" alt="Logo CNJ" height="20" width="60">
 
 Autenticador **headless** compatível com o fluxo do **PJe Office** do **CNJ** (Conselho Nacional de Justiça).  
 Este serviço expõe um endpoint HTTP local que recebe um **desafio** (challenge), assina com o seu certificado **A1 (PKCS#12)** e envia a resposta ao endpoint do tribunal.
