@@ -13,12 +13,11 @@ Este serviço expõe um endpoint HTTP local que recebe um **desafio** (challenge
 
 ---
 
-## Destaques
+## Feats
 
 - Assinatura RSA com `MD5withRSA` (padrão histórico), `SHA1withRSA` e `SHA256withRSA`.
 - Envio da cadeia de certificados em **PKIPath** (ASN.1) — implementado com `SequenceOf` tipado.
 - Servidor IPv6/IPv4, CORS liberado e `Access-Control-Allow-Private-Network`.
-- 🐳 **Docker** pronto para uso (imagem leve, usuário não-root, healthcheck).
 
 ---
 
