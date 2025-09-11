@@ -127,36 +127,10 @@ Variáveis de ambiente no Docker:
 
 ---
 
-## Notas de segurança
-
-* **Mixed content**: páginas `https://` em geral não podem fazer requests para `http://localhost` sem proxy/ajustes. Este serviço habilita CORS e `Access-Control-Allow-Private-Network`, mas o bloqueio de conteúdo misto é política do navegador.
-  **Solução**: usar um **reverse proxy** local (Nginx/Caddy) com **HTTPS** no `localhost` apontando para `http://127.0.0.1:8800`.
-* O container roda como **usuário não-root**.
-* Monte o certificado com `:ro` e restrinja permissões do arquivo fonte.
-* Mantenha a porta mapeada apenas em `127.0.0.1`.
-
----
-
-## Solução de problemas
-
-* **`isinstance() arg 2 must be a type ... ao construir SequenceOf`**
-  Use a subclasse tipada:
-
-  ```py
-  class PkiPath(core.SequenceOf):
-      _child_spec = x509.Certificate
-  ```
-* **4xx/5xx no callback remoto**
-  Verifique `servidor + enviarPara`, cookies em `sessao` e o algoritmo (`MD5withRSA`, `SHA1withRSA`, `SHA256withRSA`).
-* **Certificado sem chave privada**
-  O `cryptography` precisa encontrar chave e certificado válidos no PFX.
-
----
-
 ## Referências
 
-* **CNJ — Conselho Nacional de Justiça**: [https://www.cnj.jus.br/](https://www.cnj.jus.br/)
-* **PJeOffice Pro (CNJ)**: esta implementação foi **inspirada** e **baseada** na codebase/fluxo do *PJeOffice Pro* do CNJ e no protocolo observado nas integrações oficiais. Este projeto é **independente** e **não-oficial**.
+* **CNJ — Conselho Nacional de Justiça**: [https://www.cnj.jus.br/](https://www.cnj.jus.br/) 
+* **PJeOffice Pro (CNJ)**: esta implementação foi **inspirada** e **baseada** na codebase/fluxo do *PJeOffice Pro* do CNJ e no protocolo observado nas integrações oficiais. Este projeto é **independente** e **não-oficial**. Foi feita a engenharia reversa, decompilando a aplicação Java com o Lyuten  [https://github.com/deathmarine/Luyten](https://github.com/deathmarine/Luyten).
 
 ---
 
