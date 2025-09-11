@@ -133,9 +133,3 @@ Variáveis de ambiente no Docker:
 * **PJeOffice Pro (CNJ)**: esta implementação foi **inspirada** e **baseada** na codebase/fluxo do *PJeOffice Pro* do CNJ e no protocolo observado nas integrações oficiais. Este projeto é **independente** e **não-oficial**. Foi feita a engenharia reversa, decompilando a aplicação Java com o Lyuten  [https://github.com/deathmarine/Luyten](https://github.com/deathmarine/Luyten).
 
 ---
-
-## 📄 Licença
-
-GNU. Este projeto **não** é afiliado ao CNJ.
-
----
