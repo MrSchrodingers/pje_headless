@@ -6,6 +6,8 @@ require (
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
 	github.com/miekg/pkcs11 v1.1.2
+	google.golang.org/grpc v1.81.1
+	google.golang.org/protobuf v1.36.11
 	software.sslmate.com/src/go-pkcs12 v0.7.2
 )
 
@@ -20,6 +22,4 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
-	google.golang.org/grpc v1.81.1 // indirect
-	google.golang.org/protobuf v1.36.11 // indirect
 )

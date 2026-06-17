@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/MrSchrodingers/pje_headless/internal/audit"
+	"github.com/MrSchrodingers/pje_headless/internal/browser"
 	"github.com/MrSchrodingers/pje_headless/internal/config"
 	"github.com/MrSchrodingers/pje_headless/internal/grpcsigner"
 	"github.com/MrSchrodingers/pje_headless/internal/pjeoffice"
@@ -18,6 +22,8 @@ func main() {
 	switch cfg.Mode {
 	case "signer-only":
 		runSignerOnly(cfg, log)
+	case "login":
+		runLogin(cfg, log)
 	default:
 		runFull(cfg, log)
 	}
@@ -102,4 +108,30 @@ func buildOrderedSigners(cfg config.Config, log *slog.Logger) []signer.Signer {
 		}
 	}
 	return signers
+}
+
+// runLogin executes a single headless jus.br login using the configured Signer
+// (e.g. PJE_SIGNER_PRIORITY=remote -> RemoteSigner to the token host) and prints
+// a masked confirmation of the captured bearer. End-to-end driver: proves the
+// full dual flow (browser + :8800 + signer) against the live SSO. The full
+// bearer is never logged.
+func runLogin(cfg config.Config, log *slog.Logger) {
+	s := buildSigner(cfg, log)
+	b := browser.New(s, browser.ConfigFromEnv(), log)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	bearer, err := b.Login(ctx)
+	if err != nil {
+		log.Error("login falhou", "err", err)
+		os.Exit(1)
+	}
+
+	masked := bearer
+	if len(masked) > 28 {
+		masked = masked[:20] + "..." + masked[len(masked)-6:]
+	}
+	log.Info("LOGIN OK", "bearer_masked", masked, "bearer_len", len(bearer))
+	fmt.Printf("LOGIN_OK bearer_len=%d\n", len(bearer))
 }
