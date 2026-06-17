@@ -39,9 +39,9 @@ func (f *fakeSigner) Identity(_ context.Context) (signer.Identity, error) {
 }
 func (f *fakeSigner) Available(_ context.Context) bool { return true }
 
-// TestHealthGET verifica que GET /pjeOffice/ devolve 200 com body GIF (Content-Type image/gif).
+// TestHealthGET verifica que GET /pjeOffice/ devolve 200 com exatamente os bytes de gifOK.
 func TestHealthGET(t *testing.T) {
-	srv := pjeoffice.NewServer(&fakeSigner{sig: "X", chain: "Y"}, "0")
+	srv := pjeoffice.NewServer(&fakeSigner{sig: "X", chain: "Y"}, "0", "127.0.0.1")
 
 	req := httptest.NewRequest(http.MethodGet, "/pjeOffice/", nil)
 	rr := httptest.NewRecorder()
@@ -54,15 +54,15 @@ func TestHealthGET(t *testing.T) {
 	if !strings.HasPrefix(ct, "image/gif") {
 		t.Fatalf("health: want image/gif, got %q", ct)
 	}
-	if rr.Body.Len() == 0 {
-		t.Fatal("health: body must not be empty")
+	if got, want := rr.Body.Bytes(), pjeoffice.GifOK(); !bytes.Equal(got, want) {
+		t.Fatalf("health: body bytes mismatch: got %x, want %x", got, want)
 	}
 }
 
 // TestOptionsPreflightCORS verifica que OPTIONS retorna 204 com os headers CORS
 // incluindo Access-Control-Allow-Private-Network.
 func TestOptionsPreflightCORS(t *testing.T) {
-	srv := pjeoffice.NewServer(&fakeSigner{sig: "X", chain: "Y"}, "0")
+	srv := pjeoffice.NewServer(&fakeSigner{sig: "X", chain: "Y"}, "0", "127.0.0.1")
 
 	req := httptest.NewRequest(http.MethodOptions, "/pjeOffice/requisicao/", nil)
 	req.Header.Set("Origin", "https://pje.jus.br")
@@ -102,7 +102,7 @@ func TestRequisicaoPOSTAssinaEEnvia(t *testing.T) {
 	defer tribunal.Close()
 
 	fs := &fakeSigner{sig: "QUJD", chain: "REVG"}
-	srv := pjeoffice.NewServer(fs, "0")
+	srv := pjeoffice.NewServer(fs, "0", "127.0.0.1")
 
 	tarefa := map[string]any{
 		"mensagem":            "desafio",
@@ -125,13 +125,16 @@ func TestRequisicaoPOSTAssinaEEnvia(t *testing.T) {
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
 
-	// Cliente deve receber 200 + GIF
+	// Cliente deve receber 200 + exatamente os bytes de gifOK
 	if rr.Code != http.StatusOK {
 		t.Fatalf("POST /requisicao/: want 200, got %d — body: %s", rr.Code, rr.Body.String())
 	}
 	ct := rr.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "image/gif") {
 		t.Fatalf("POST /requisicao/: want image/gif content-type, got %q", ct)
+	}
+	if got, want := rr.Body.Bytes(), pjeoffice.GifOK(); !bytes.Equal(got, want) {
+		t.Fatalf("POST /requisicao/: body bytes mismatch: got %x, want %x", got, want)
 	}
 
 	// Login deve ter sido chamado
@@ -165,10 +168,12 @@ func TestRequisicaoPOSTAssinaEEnvia(t *testing.T) {
 }
 
 // TestRequisicaoPOSTSignerError verifica que se o signer falhar, o servidor
-// devolve 200 + GIF de erro (comportamento fiel ao 1.0 Python: nunca propaga 5xx ao browser).
+// devolve 200 + exatamente os bytes de gifErr (comportamento fiel ao 1.0 Python:
+// nunca propaga 5xx ao browser).
+// B-1: a asercao discrimina gifErr de gifOK — ambos tem 43 bytes mas conteudo diferente.
 func TestRequisicaoPOSTSignerError(t *testing.T) {
 	fs := &fakeSigner{signErr: io.ErrUnexpectedEOF}
-	srv := pjeoffice.NewServer(fs, "0")
+	srv := pjeoffice.NewServer(fs, "0", "127.0.0.1")
 
 	tarefa := map[string]any{
 		"mensagem":            "desafio",
@@ -194,9 +199,9 @@ func TestRequisicaoPOSTSignerError(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("signer error: want 200, got %d", rr.Code)
 	}
-	// GIF de erro e maior que o GIF de sucesso (2 pixels largura vs 1 pixel)
-	if rr.Body.Len() == 0 {
-		t.Fatal("signer error: body should not be empty")
+	// Deve ser exatamente gifErr, nao gifOK (ambos tem 43 bytes, conteudo diferente).
+	if got, want := rr.Body.Bytes(), pjeoffice.GifErr(); !bytes.Equal(got, want) {
+		t.Fatalf("signer error: want gifErr bytes %x, got %x", want, got)
 	}
 }
 
@@ -213,7 +218,7 @@ func TestRequisicaoGETAssinaEEnvia(t *testing.T) {
 	defer tribunal.Close()
 
 	fs := &fakeSigner{sig: "U0lH", chain: "Q0VSVA=="}
-	srv := pjeoffice.NewServer(fs, "0")
+	srv := pjeoffice.NewServer(fs, "0", "127.0.0.1")
 
 	tarefa := map[string]any{
 		"mensagem":            "hello",
@@ -248,6 +253,86 @@ func TestRequisicaoGETAssinaEEnvia(t *testing.T) {
 	}
 	if body["assinatura"] != "U0lH" {
 		t.Fatalf("GET: want assinatura=U0lH, got %v", body["assinatura"])
+	}
+}
+
+// TestRequisicaoPOSTSSRFSchemeRejected verifica que URLs com scheme nao-HTTP
+// (file://, gopher://, etc.) sao rejeitadas antes de qualquer conexao de saida,
+// e o handler retorna 200 + gifErr ao cliente. B-2 (SSRF guard).
+func TestRequisicaoPOSTSSRFSchemeRejected(t *testing.T) {
+	fs := &fakeSigner{sig: "QUJD", chain: "REVG"}
+	srv := pjeoffice.NewServer(fs, "0", "127.0.0.1")
+
+	tarefa := map[string]any{
+		"mensagem":            "desafio",
+		"enviarPara":          "/etc/passwd",
+		"token":               "t1",
+		"algoritmoAssinatura": "SHA256withRSA",
+	}
+	tarefaJSON, _ := json.Marshal(tarefa)
+
+	for _, badScheme := range []string{"file://", "gopher://host", "ftp://host"} {
+		envelope := map[string]any{
+			"servidor": badScheme,
+			"versao":   "2.5.16",
+			"sessao":   "",
+			"tarefa":   string(tarefaJSON),
+		}
+		envelopeJSON, _ := json.Marshal(envelope)
+
+		req := httptest.NewRequest(http.MethodPost, "/pjeOffice/requisicao/", bytes.NewReader(envelopeJSON))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		srv.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("SSRF %q: want 200, got %d", badScheme, rr.Code)
+		}
+		if got, want := rr.Body.Bytes(), pjeoffice.GifErr(); !bytes.Equal(got, want) {
+			t.Fatalf("SSRF %q: want gifErr bytes, got %x", badScheme, got)
+		}
+	}
+}
+
+// TestRequisicaoPOSTTribunalFails verifica que quando o tribunal retorna 500,
+// o handler devolve 200 + exatamente os bytes de gifErr ao cliente.
+// B-8: cobre o caminho de falha do POST remoto distinguindo gifErr de gifOK.
+func TestRequisicaoPOSTTribunalFails(t *testing.T) {
+	tribunal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer tribunal.Close()
+
+	fs := &fakeSigner{sig: "QUJD", chain: "REVG"}
+	srv := pjeoffice.NewServer(fs, "0", "127.0.0.1")
+
+	tarefa := map[string]any{
+		"mensagem":            "desafio",
+		"enviarPara":          "/cb",
+		"token":               "t1",
+		"algoritmoAssinatura": "SHA256withRSA",
+	}
+	tarefaJSON, _ := json.Marshal(tarefa)
+
+	envelope := map[string]any{
+		"servidor": tribunal.URL,
+		"versao":   "2.5.16",
+		"sessao":   "",
+		"tarefa":   string(tarefaJSON),
+	}
+	envelopeJSON, _ := json.Marshal(envelope)
+
+	req := httptest.NewRequest(http.MethodPost, "/pjeOffice/requisicao/", bytes.NewReader(envelopeJSON))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tribunal 500: want 200 from pjeoffice handler, got %d", rr.Code)
+	}
+	// O handler nao deve propagar 5xx ao browser; deve retornar gifErr discriminado de gifOK.
+	if got, want := rr.Body.Bytes(), pjeoffice.GifErr(); !bytes.Equal(got, want) {
+		t.Fatalf("tribunal 500: want gifErr bytes %x, got %x", want, got)
 	}
 }
 

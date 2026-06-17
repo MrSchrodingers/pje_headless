@@ -15,6 +15,7 @@ type Config struct {
 	PFXPath       string
 	PFXPass       string
 	PJeOfficePort string // default "8800"
+	BindAddr      string // interface to bind; default "127.0.0.1" (loopback only)
 	ChainDir      string // certs intermediarios/raiz (opcional)
 }
 
@@ -29,6 +30,7 @@ func FromEnv() Config {
 		PFXPath:       os.Getenv("PJE_PFX_PATH"),
 		PFXPass:       os.Getenv("PJE_PFX_PASS"),
 		PJeOfficePort: envOr("PJE_PJEOFFICE_PORT", "8800"),
+		BindAddr:      envOr("PJE_BIND_ADDR", "127.0.0.1"),
 		ChainDir:      os.Getenv("PJE_CHAIN_DIR"),
 	}
 }

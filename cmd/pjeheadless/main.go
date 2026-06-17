@@ -16,7 +16,7 @@ func main() {
 
 	s := buildSigner(cfg, log)
 
-	srv := pjeoffice.NewServer(s, cfg.PJeOfficePort)
+	srv := pjeoffice.NewServer(s, cfg.PJeOfficePort, cfg.BindAddr)
 	srv.SetLogger(log)
 
 	if err := srv.Start(); err != nil {

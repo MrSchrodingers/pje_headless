@@ -44,23 +44,27 @@ func mustDecodeBase64(s string) []byte {
 
 // Server is the PJeOffice HTTP server. Create via NewServer; start via Start or Serve.
 type Server struct {
-	signer  signer.Signer
-	port    string
-	log     *slog.Logger
-	handler http.Handler
+	signer   signer.Signer
+	port     string
+	bindAddr string // interface to bind; defaults to 127.0.0.1 (loopback)
+	log      *slog.Logger
+	handler  http.Handler
 	// httpClient is used for the outbound POST to the tribunal endpoint.
 	// It is configured once at construction and shared across requests.
 	httpClient *http.Client
 }
 
-// NewServer creates a Server that will accept requests on the given port.
-// port "0" lets the OS pick a free port (useful for tests).
+// NewServer creates a Server that will accept requests on the given port and
+// bind address. port "0" lets the OS pick a free port (useful for tests).
+// bindAddr controls the interface to bind: use "127.0.0.1" (loopback) for
+// local-only access or "0.0.0.0" to expose on all interfaces.
 // The signer must be safe for concurrent use.
-func NewServer(s signer.Signer, port string) *Server {
+func NewServer(s signer.Signer, port, bindAddr string) *Server {
 	srv := &Server{
-		signer: s,
-		port:   port,
-		log:    slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		signer:   s,
+		port:     port,
+		bindAddr: bindAddr,
+		log:      slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),
 		httpClient: &http.Client{
 			Timeout: connectTimeout + readTimeout,
 			// Do not follow redirects — the protocol considers 302/304 as success codes.
@@ -81,15 +85,23 @@ func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	srv.handler.ServeHTTP(w, r)
 }
 
-// Start listens on the configured port and blocks until the server exits.
-// Bind strategy: IPv6 with IPV6_V6ONLY=0 (dual-stack, mirrors Python DualStackServer).
+// Start listens on the configured port and bind address, then blocks until
+// the server exits. The bind address is resolved from cfg.BindAddr (default
+// "127.0.0.1", i.e. loopback only). When the primary bind fails and the
+// configured address is an IPv4 loopback, a single IPv6 loopback ("::1")
+// fallback is attempted so the server still works on IPv6-only hosts.
 func (srv *Server) Start() error {
-	addr := net.JoinHostPort("::", srv.port)
-	ln, err := net.Listen("tcp6", addr)
+	addr := net.JoinHostPort(srv.bindAddr, srv.port)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		// Fallback: some environments disable IPv6; use IPv4.
-		ln, err = net.Listen("tcp4", ":"+srv.port)
-		if err != nil {
+		// Fallback: if the caller requested IPv4 loopback but the host only
+		// has IPv6 loopback, try ::1 so the service stays local-only.
+		if srv.bindAddr == "127.0.0.1" {
+			ln, err = net.Listen("tcp6", net.JoinHostPort("::1", srv.port))
+			if err != nil {
+				return fmt.Errorf("pjeoffice: listen: %w", err)
+			}
+		} else {
 			return fmt.Errorf("pjeoffice: listen: %w", err)
 		}
 	}
@@ -99,9 +111,11 @@ func (srv *Server) Start() error {
 // Serve accepts connections on ln. Useful when the caller owns the listener.
 func (srv *Server) Serve(ln net.Listener) error {
 	hs := &http.Server{
-		Handler:      srv.handler,
-		ReadTimeout:  readTimeout,
-		WriteTimeout: readTimeout + connectTimeout,
+		Handler:           srv.handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      readTimeout + connectTimeout,
+		MaxHeaderBytes:    2 << 20, // 2 MiB
 	}
 	srv.log.Info("PJeOffice headless pronto", "addr", ln.Addr().String())
 	return hs.Serve(ln)
@@ -288,6 +302,17 @@ func (srv *Server) process(ctx context.Context, raw map[string]any) error {
 	}
 
 	target := env.Servidor + t.EnviarPara
+
+	// B-2: Validate the target URL to prevent SSRF via non-HTTP schemes
+	// (file://, gopher://, ftp://, etc.). Only http and https are accepted.
+	parsedTarget, err := url.Parse(target)
+	if err != nil {
+		return fmt.Errorf("process: invalid target URL %q: %w", target, err)
+	}
+	if s := parsedTarget.Scheme; s != "http" && s != "https" {
+		return fmt.Errorf("process: target URL scheme %q is not allowed (only http/https)", s)
+	}
+
 	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(outJSON))
 	if err != nil {
 		return fmt.Errorf("process: new request: %w", err)
