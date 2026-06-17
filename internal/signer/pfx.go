@@ -95,9 +95,8 @@ func (s *PFXSigner) Sign(_ context.Context, phrase, algorithm string) (string, e
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
-// CertChainPKIPath returns the base64-encoded certificate chain (leaf first).
-// TODO(task-3): replace with PKIPathB64 (ASN.1 SEQUENCE OF Certificate, RFC 3820).
-// Current implementation concatenates raw DER bytes — a placeholder only.
+// CertChainPKIPath returns the ASN.1 PKIPath (SEQUENCE OF Certificate, RFC 3820)
+// of the certificate chain (leaf first), base64-encoded.
 // Login must be called first.
 func (s *PFXSigner) CertChainPKIPath(_ context.Context) (string, error) {
 	s.mu.RLock()
@@ -109,13 +108,12 @@ func (s *PFXSigner) CertChainPKIPath(_ context.Context) (string, error) {
 		return "", errors.New("pfx chain: not logged in")
 	}
 
-	all := append([]*x509.Certificate{cert}, chain...)
-	var der []byte
-	for _, c := range all {
-		der = append(der, c.Raw...)
+	extraDER := make([][]byte, len(chain))
+	for i, c := range chain {
+		extraDER[i] = c.Raw
 	}
 
-	return base64.StdEncoding.EncodeToString(der), nil
+	return PKIPathB64(cert.Raw, extraDER)
 }
 
 // Identity returns Subject, Issuer, Serial and NotAfter from the leaf cert.

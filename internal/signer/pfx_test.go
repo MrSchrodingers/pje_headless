@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"math/big"
 	"os"
@@ -173,8 +174,8 @@ func TestPFXIdentity(t *testing.T) {
 
 // TestPFXCertChainPKIPath verifies the observable behaviour of CertChainPKIPath:
 // (a) the returned string is non-empty after Login; (b) decoding the base64 yields
-// bytes that begin with the leaf certificate DER (current DER-concatenation
-// placeholder — format will change in Task 3).
+// a valid ASN.1 SEQUENCE OF Certificate (RFC 3820 PKIPath) whose first element
+// FullBytes equal the leaf certificate DER.
 func TestPFXCertChainPKIPath(t *testing.T) {
 	pfxPath, certDER := makePFX(t, "senha")
 
@@ -196,12 +197,16 @@ func TestPFXCertChainPKIPath(t *testing.T) {
 		t.Fatalf("base64 decode: %v", err)
 	}
 
-	if len(raw) < len(certDER) {
-		t.Fatalf("decoded chain too short: got %d bytes, want at least %d", len(raw), len(certDER))
+	var seq []asn1.RawValue
+	if _, err := asn1.Unmarshal(raw, &seq); err != nil {
+		t.Fatalf("CertChainPKIPath: resultado nao e SEQUENCE OF valido: %v", err)
 	}
-	// The leaf DER must be the prefix of the concatenated bytes.
-	if !bytes.Equal(raw[:len(certDER)], certDER) {
-		t.Fatal("decoded chain does not begin with leaf certificate DER")
+	if len(seq) < 1 {
+		t.Fatal("CertChainPKIPath: SEQUENCE vazia, esperado ao menos 1 certificado")
+	}
+	// Leaf must be the first element; FullBytes must equal the original DER.
+	if !bytes.Equal(seq[0].FullBytes, certDER) {
+		t.Fatal("CertChainPKIPath: primeiro elemento nao corresponde ao DER do certificado folha")
 	}
 }
 
