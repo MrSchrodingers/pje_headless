@@ -130,6 +130,24 @@ func TestDualFallsBackWhenPrimaryUnavailable(t *testing.T) {
 	}
 }
 
+// --- (b2) CertChainPKIPath delega ao backend ativo correto ---------------------
+
+func TestDualCertChainDelegatesToActiveBackend(t *testing.T) {
+	a := &fakeSigner{available: false, id: "Bruna"}
+	b := &fakeSigner{available: true, id: "Marcos"}
+	d := signer.NewDual([]signer.Signer{a, b}, audit.New(io.Discard))
+
+	ctx := context.Background()
+	pkipath, err := d.CertChainPKIPath(ctx)
+	if err != nil {
+		t.Fatalf("CertChainPKIPath: %v", err)
+	}
+	// fakeSigner.CertChainPKIPath returns "pkipath:<id>"; must come from Marcos.
+	if pkipath != "pkipath:Marcos" {
+		t.Fatalf("expected CertChainPKIPath from Marcos (fallback), got %q", pkipath)
+	}
+}
+
 // --- (c) ao trocar de identidade entre chamadas, emite identity_switch ----------
 
 func TestDualFallbackEmitsIdentitySwitch(t *testing.T) {
@@ -156,11 +174,13 @@ func TestDualFallbackEmitsIdentitySwitch(t *testing.T) {
 	if !strings.Contains(out, "identity_switch") {
 		t.Fatalf("expected identity_switch event in log; got:\n%s", out)
 	}
-	if !strings.Contains(out, "Bruna") {
-		t.Fatalf("expected from=Bruna in log; got:\n%s", out)
+	// Verify the JSON keys explicitly so that an arg-inversion in
+	// audit.IdentitySwitch(log, prev, curr) would be caught here.
+	if !strings.Contains(out, `"from":"Bruna"`) {
+		t.Fatalf("expected \"from\":\"Bruna\" in log; got:\n%s", out)
 	}
-	if !strings.Contains(out, "Marcos") {
-		t.Fatalf("expected to=Marcos in log; got:\n%s", out)
+	if !strings.Contains(out, `"to":"Marcos"`) {
+		t.Fatalf("expected \"to\":\"Marcos\" in log; got:\n%s", out)
 	}
 }
 
