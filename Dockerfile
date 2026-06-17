@@ -4,7 +4,7 @@
 # Stage 1: build
 # CGO e necessario para miekg/pkcs11 (binding C do PKCS#11).
 # ---------------------------------------------------------------------------
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libc6-dev ca-certificates \

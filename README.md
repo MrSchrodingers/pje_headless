@@ -52,7 +52,7 @@ Pacotes previstos no Plano 2 (em desenvolvimento, nao presentes ainda):
 
 ## Build
 
-Requer Go >= 1.25 e CGO habilitado (necessario para o `miekg/pkcs11`, que
+Requer Go >= 1.26 e CGO habilitado (necessario para o `miekg/pkcs11`, que
 compila o binding C do PKCS#11).
 
 ```bash
