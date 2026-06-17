@@ -12,3 +12,7 @@ pjeoffice_headless.egg-info
 cj.txt
 .env
 .env.*
+
+# Artefatos de debug e planejamento interno (nao publicar)
+test.sh
+docs/
