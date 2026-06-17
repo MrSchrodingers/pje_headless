@@ -23,7 +23,7 @@ func main() {
 	fmt.Printf("  PKCS11Pin:     %s\n", presence(cfg.PKCS11Pin))
 	fmt.Printf("  PKCS11Slot:    %s\n", cfg.PKCS11Slot)
 	fmt.Printf("  PKCS11Label:   %s\n", cfg.PKCS11Label)
-	fmt.Printf("  PFXPath:       %s\n", cfg.PFXPath)
+	fmt.Printf("  PFXPath:       %s\n", presence(cfg.PFXPath))
 	fmt.Printf("  PFXPass:       %s\n", presence(cfg.PFXPass))
 	fmt.Printf("  PJeOfficePort: %s\n", cfg.PJeOfficePort)
 	fmt.Printf("  ChainDir:      %s\n", cfg.ChainDir)
