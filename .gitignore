@@ -2,3 +2,13 @@ build/
 bin/
 certificate/**.pfx
 pjeoffice_headless.egg-info
+
+# Segredos — nunca versionar (certificados, chaves, env)
+*.pfx
+*.p12
+*.pem
+*.key
+*.jks
+cj.txt
+.env
+.env.*
