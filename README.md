@@ -1,63 +1,211 @@
-# pjeoffice-headless
+# pje_headless 2.0
 
-[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://www.python.org/)
-![Status](https://img.shields.io/badge/status-alpha-yellow)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![Dockerized](https://img.shields.io/badge/docker-ready-blue)
-<img src="https://www.cnj.jus.br/wp-content/uploads/2023/09/logo-cnj-portal-20-09-1.svg" alt="Logo CNJ" height="20" width="60">
+Autenticador headless do protocolo PJeOffice (CNJ). Servico escrito em Go que
+expoe um endpoint HTTP local na porta 8800, recebe desafios de assinatura do
+fluxo PJeOffice, assina com o certificado configurado e envia a resposta ao
+tribunal.
 
-Autenticador **headless** compatível com o fluxo do **PJe Office** do **CNJ** (Conselho Nacional de Justiça).  
-Este serviço expõe um endpoint HTTP local que recebe um **desafio** (challenge), assina com o seu certificado **A1 (PKCS#12)** e envia a resposta ao endpoint do tribunal.
-
-> ⚠️ **Aviso**: projeto **não-oficial**. Implementa, de forma independente, o comportamento do cliente PJe Office com base na **codebase do PJeOffice Pro (CNJ)/ Java** e na observação do protocolo. Não é mantido pelo CNJ.
+Implementa o protocolo de forma independente, com base na codebase do PJeOffice
+Pro (CNJ) e na observacao do protocolo. Projeto nao-oficial, sem vinculo com o
+CNJ.
 
 ---
 
-## Destaques
+## O que e
 
-- Assinatura RSA com `MD5withRSA` (padrão histórico), `SHA1withRSA` e `SHA256withRSA`.
-- Envio da cadeia de certificados em **PKIPath** (ASN.1) — implementado com `SequenceOf` tipado.
-- Servidor IPv6/IPv4, CORS liberado e `Access-Control-Allow-Private-Network`.
-- 🐳 **Docker** pronto para uso (imagem leve, usuário não-root, healthcheck).
+O servico cobre a camada de **autenticacao por certificado digital** do PJeOffice:
+
+- Recebe o desafio (`mensagem`) via HTTP.
+- Assina com o certificado ativo usando `MD5withRSA`, `SHA1withRSA` ou
+  `SHA256withRSA`.
+- Envia `{uuid, mensagem, assinatura, certChain}` ao endpoint do tribunal
+  (`servidor + enviarPara`).
+- Expoe `GET /pjeOffice/` como health-check.
+
+**Assinatura dual:** o servico suporta dois backends de assinatura por ordem de
+prioridade com fallback automatico:
+
+- `pkcs11` — token A3 (hardware, nao exportavel) via modulo PKCS#11 (ex.:
+  SafeSign `libaetpkss.so`). Assina dentro do token.
+- `pfx` — certificado A1 em arquivo `.pfx`/`.p12` (PKCS#12).
+
+Quando o backend de maior prioridade esta indisponivel, o servico cai para o
+proximo e emite log `WARN` com a identidade ativa. Nenhum backend disponivel
+resulta em erro explicito.
 
 ---
 
-# Instalação (sem Docker)
+## Arquitetura
+
+```
+cmd/pjeheadless/       # main: bootstrap, leitura de config, montagem do Signer
+internal/config/       # carrega env vars; tipo Config
+internal/audit/        # logging estruturado JSON (log/slog)
+internal/signer/       # interface Signer; PFXSigner; PKCS11Signer; DualSigner
+internal/pjeoffice/    # servidor HTTP :8800; implementacao do protocolo PJeOffice
+```
+
+Pacotes previstos no Plano 2 (em desenvolvimento, nao presentes ainda):
+`browser`, `session`, `api` (gRPC).
+
+---
+
+## Build
+
+Requer Go >= 1.21 e CGO habilitado (necessario para o `miekg/pkcs11`, que
+compila o binding C do PKCS#11).
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-python -m pjeoffice_headless --certificate /caminho/cert.pfx --password "senha" --port 8800
-````
+# Instalar dependencias de compilacao (Debian/Ubuntu)
+apt-get install -y gcc libc6-dev
 
-Health-check:
+# Compilar o binario
+go build -o bin/pjeheadless ./cmd/pjeheadless
+
+# Ou via Makefile
+make build
+```
+
+Para verificar sem gerar binario:
 
 ```bash
-curl -I http://localhost:8800/pjeOffice/
+go vet ./...
 ```
 
 ---
 
-## Uso com Docker
+## Execucao
 
-### Build local
+O servico e configurado exclusivamente por variaveis de ambiente. Nenhum
+segredo deve ser passado por argumento de linha de comando ou versionado.
+
+### Variaveis de ambiente
+
+| Variavel               | Padrao                       | Descricao                                             |
+|------------------------|------------------------------|-------------------------------------------------------|
+| `PJE_MODE`             | `full`                       | Modo do servico. `full` ativa o servidor PJeOffice. `signer-only` e roadmap (Plano 2). |
+| `PJE_SIGNER_PRIORITY`  | `pkcs11,pfx`                 | Ordem de backends. Primeiro disponivel e usado.       |
+| `PJE_PKCS11_MODULE`    | `/usr/lib/libaetpkss.so`     | Caminho do modulo PKCS#11 do token A3.                |
+| `PJE_PKCS11_PIN`       | (sem padrao)                 | PIN do token A3.                                      |
+| `PJE_PKCS11_SLOT`      | (sem padrao)                 | Slot do token (opcional; usa primeiro disponivel se vazio). |
+| `PJE_PKCS11_TOKEN_LABEL` | (sem padrao)               | Label do token (opcional).                            |
+| `PJE_PFX_PATH`         | (sem padrao)                 | Caminho do arquivo `.pfx`/`.p12`.                     |
+| `PJE_PFX_PASS`         | (sem padrao)                 | Senha do arquivo PFX.                                 |
+| `PJE_PJEOFFICE_PORT`   | `8800`                       | Porta do servidor HTTP.                               |
+| `PJE_BIND_ADDR`        | `127.0.0.1`                  | Interface de bind. Padrao loopback (somente local).   |
+| `PJE_CHAIN_DIR`        | (sem padrao)                 | Diretorio com certificados intermediarios/raiz (opcional). |
+
+### Exemplo: modo PFX (A1)
 
 ```bash
-docker build -t pjeoffice-headless:1.0.0 .
+PJE_SIGNER_PRIORITY=pfx \
+PJE_PFX_PATH=/run/secrets/cert.pfx \
+PJE_PFX_PASS=senha-do-pfx \
+./bin/pjeheadless
 ```
 
-### Executar
+### Exemplo: modo token A3 (PKCS#11) com fallback para PFX
+
+```bash
+PJE_SIGNER_PRIORITY=pkcs11,pfx \
+PJE_PKCS11_MODULE=/usr/lib/libaetpkss.so \
+PJE_PKCS11_PIN=pin-do-token \
+PJE_PFX_PATH=/run/secrets/cert.pfx \
+PJE_PFX_PASS=senha-do-pfx \
+./bin/pjeheadless
+```
+
+---
+
+## Endpoints
+
+### `GET /pjeOffice/`
+
+Health-check. Retorna GIF 1x1 com status 200.
+
+```bash
+curl -I http://127.0.0.1:8800/pjeOffice/
+```
+
+### `GET /pjeOffice/requisicao/?r=<payload_url_encoded>`
+
+Modo "image ping" (legado).
+
+### `POST /pjeOffice/requisicao/`
+
+Modo principal. Corpo JSON:
+
+```json
+{
+  "servidor": "https://exemplo.jus.br",
+  "versao": "2.5.16",
+  "sessao": "AWSALB=...; JSESSIONID=...",
+  "tarefa": "{\"mensagem\":\"<DESAFIO>\",\"enviarPara\":\"/callback\",\"token\":\"<UUID>\",\"algoritmoAssinatura\":\"MD5withRSA\"}"
+}
+```
+
+Campos:
+
+- `servidor`: base do host de destino (concatenado com `enviarPara`).
+- `versao`: cabecalho `versao` enviado ao tribunal (default interno `2.5.16`).
+- `sessao`: cookies de sessao (opcional).
+- `tarefa` (string JSON aninhada):
+  - `mensagem`: desafio a assinar.
+  - `enviarPara`: path do endpoint remoto.
+  - `token`: identificador UUID.
+  - `algoritmoAssinatura`: `MD5withRSA` (padrao historico), `SHA1withRSA` ou `SHA256withRSA`.
+
+Exemplo:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8800/pjeOffice/requisicao/ \
+  -H "Content-Type: application/json" \
+  -d '{
+    "servidor": "https://exemplo.jus.br",
+    "tarefa": "{\"mensagem\":\"abc123\",\"enviarPara\":\"/api/assinatura\",\"token\":\"uuid-123\",\"algoritmoAssinatura\":\"SHA256withRSA\"}"
+  }'
+```
+
+---
+
+## Seguranca
+
+- **Bind loopback por padrao.** `PJE_BIND_ADDR` padrao e `127.0.0.1`; o servico
+  nao aceita conexoes externas sem configuracao explicita.
+- **SSRF scheme-guard.** Somente `http` e `https` sao aceitos como `servidor`;
+  outros schemes sao rejeitados.
+- **Segredos nunca versionados.** PIN, senha do PFX e qualquer credencial devem
+  ser fornecidos exclusivamente via variavel de ambiente ou secret de runtime
+  (Docker secret, Kubernetes secret). Nunca commitar `.pfx`, `.pem`, `.key`,
+  `.env` ou `cj.txt`.
+- **Token A3:** o modulo PKCS#11 (`.so`) e o daemon `pcscd` do host precisam
+  estar acessiveis ao processo. Em containers, montar o socket do pcscd e o
+  modulo como volumes (detalhes no Plano 2 de deploy).
+- **Container nao-root.** O Dockerfile cria e usa usuario `app` sem privilegios.
+- **Mixed content.** Paginas `https://` podem bloquear chamadas a `http://localhost`
+  por politica do navegador. Nesse caso, coloque um reverse proxy local (Nginx/Caddy)
+  com TLS apontando para `http://127.0.0.1:8800`.
+
+---
+
+## Docker
+
+### Build
+
+```bash
+docker build -t pjeoffice-headless:2.0 .
+```
+
+### Execucao (modo PFX)
 
 ```bash
 docker run --rm \
-  -e PJE_CERT_PATH=/certs/cert.pfx \
-  -e PJE_CERT_PASS="sua-senha" \
-  -e PJE_PORT=8800 \
-  -v /caminho/real/cert.pfx:/certs/cert.pfx:ro \
+  -e PJE_SIGNER_PRIORITY=pfx \
+  -e PJE_PFX_PATH=/run/secrets/cert.pfx \
+  -e PJE_PFX_PASS=senha-do-pfx \
+  -v /caminho/real/cert.pfx:/run/secrets/cert.pfx:ro \
   -p 127.0.0.1:8800:8800 \
-  pjeoffice-headless:1.0.0
+  pjeoffice-headless:2.0
 ```
 
 ### Compose
@@ -66,102 +214,25 @@ docker run --rm \
 docker compose up -d
 ```
 
-> **Dica de segurança:** mantenha o mapeamento em `127.0.0.1:8800:8800` para evitar exposição externa.
-> Se precisar HTTPS no localhost, coloque um **reverse proxy** (Nginx/Caddy) com TLS fazendo proxy para `http://pjeoffice-headless:8800`.
+---
+
+## Roadmap (Plano 2 — em desenvolvimento)
+
+Os componentes abaixo estao planejados e nao estao presentes nesta versao:
+
+- `browser`: login headless no jus.br via `chromedp` (SSO + 2FA TOTP + captura
+  do bearer token). Substitui o fluxo `selenium-wire`.
+- `session`: cache do bearer em memoria com single-flight, expiracao e refresh
+  sob 401.
+- `api` gRPC: servicos `PjeLogin` (GetBearer/ForceRefresh/Health) e `Signer`
+  (Sign/CertChain/Identity/Health) para consumo remoto.
+- `RemoteSigner`: backend que delega assinatura a uma instancia em modo
+  `signer-only` rodando no host do token (acesso local ou remoto por gRPC com mTLS).
+- Deploy Docker standalone em servidor de token; migracao do consumidor (vigia)
+  para `GetBearer` gRPC.
 
 ---
 
-## Endpoints
+## Licenca
 
-* `GET /pjeOffice/` — GIF 1×1 (OK) para health-check.
-* `GET /pjeOffice/requisicao/?r=<payload_url_encoded>` — modo “image ping” legado.
-* `POST /pjeOffice/requisicao/` — **recomendado**, com JSON no corpo.
-
-### Envelope esperado
-
-```json
-{
-  "servidor": "https://exemplo.jus.br",
-  "versao": "2.5.16",
-  "sessao": "AWSALB=...; AWSALBCORS=...; JSESSIONID=...",
-  "tarefa": "{\"mensagem\":\"<DESAFIO>\",\"enviarPara\":\"/callback\",\"token\":\"<UUID>\",\"algoritmoAssinatura\":\"MD5withRSA\"}"
-}
-```
-
-Campos:
-
-* `servidor`: base do host de destino; será concatenado com `enviarPara`.
-* `versao`: cabeçalho `versao` (default interno: `2.5.16`).
-* `sessao`: cookies de sessão (opcional).
-* `tarefa` (string JSON):
-
-  * `mensagem`: desafio
-  * `enviarPara`: path do endpoint remoto
-  * `token`: identificador
-  * `algoritmoAssinatura`: `MD5withRSA` (padrão), `SHA1withRSA` ou `SHA256withRSA`.
-
-Exemplo `POST`:
-
-```bash
-curl -sS -X POST http://localhost:8800/pjeOffice/requisicao/ \
-  -H "Content-Type: application/json" \
-  -d '{"servidor":"https://exemplo.jus.br","tarefa":"{\"mensagem\":\"abc123\",\"enviarPara\":\"/api/assinatura\",\"token\":\"uuid-123\",\"algoritmoAssinatura\":\"SHA256withRSA\"}"}'
-```
-
----
-
-## Configurações
-
-Constantes internas (podem ser alteradas no código):
-
-* `PJE_VERSION="2.5.16"`
-* `CONNECT_TIMEOUT=3` (s)
-* `READ_TIMEOUT=10` (s)
-* `SUCCESS_CODES = {200, 201, 202, 204, 302, 304}`
-
-Variáveis de ambiente no Docker:
-
-* `PJE_CERT_PATH` (**obrigatório**) — caminho do `.pfx/.p12` montado.
-* `PJE_CERT_PASS` (**obrigatório**) — senha do certificado.
-* `PJE_PORT` (opcional, default `8800`) — porta exposta pelo servidor.
-
----
-
-## Notas de segurança
-
-* **Mixed content**: páginas `https://` em geral não podem fazer requests para `http://localhost` sem proxy/ajustes. Este serviço habilita CORS e `Access-Control-Allow-Private-Network`, mas o bloqueio de conteúdo misto é política do navegador.
-  **Solução**: usar um **reverse proxy** local (Nginx/Caddy) com **HTTPS** no `localhost` apontando para `http://127.0.0.1:8800`.
-* O container roda como **usuário não-root**.
-* Monte o certificado com `:ro` e restrinja permissões do arquivo fonte.
-* Mantenha a porta mapeada apenas em `127.0.0.1`.
-
----
-
-## Solução de problemas
-
-* **`isinstance() arg 2 must be a type ... ao construir SequenceOf`**
-  Use a subclasse tipada:
-
-  ```py
-  class PkiPath(core.SequenceOf):
-      _child_spec = x509.Certificate
-  ```
-* **4xx/5xx no callback remoto**
-  Verifique `servidor + enviarPara`, cookies em `sessao` e o algoritmo (`MD5withRSA`, `SHA1withRSA`, `SHA256withRSA`).
-* **Certificado sem chave privada**
-  O `cryptography` precisa encontrar chave e certificado válidos no PFX.
-
----
-
-## Referências
-
-* **CNJ — Conselho Nacional de Justiça**: [https://www.cnj.jus.br/](https://www.cnj.jus.br/)
-* **PJeOffice Pro (CNJ)**: esta implementação foi **inspirada** e **baseada** na codebase/fluxo do *PJeOffice Pro* do CNJ e no protocolo observado nas integrações oficiais. Este projeto é **independente** e **não-oficial**.
-
----
-
-## 📄 Licença
-
-GNU. Este projeto **não** é afiliado ao CNJ.
-
----
+GNU General Public License v3.0. Projeto nao afiliado ao CNJ.

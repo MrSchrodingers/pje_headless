@@ -1,39 +1,61 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.12-slim AS base
 
-# Dependências de runtime mínimas
+# ---------------------------------------------------------------------------
+# Stage 1: build
+# CGO e necessario para miekg/pkcs11 (binding C do PKCS#11).
+# ---------------------------------------------------------------------------
+FROM golang:1.25-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+# Copiar modulos primeiro para aproveitar o cache de layers.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copiar o restante do codigo-fonte.
+COPY cmd/       cmd/
+COPY internal/  internal/
+
+RUN CGO_ENABLED=1 go build -trimpath -o /out/pjeheadless ./cmd/pjeheadless
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime
+# Imagem slim; apenas o binario e as dependencias de sistema necessarias.
+#
+# Modo token A3 (PKCS#11): o modulo .so (ex.: libaetpkss.so) e o socket do
+# pcscd do host precisam ser montados como volumes no deploy. Exemplo:
+#   -v /usr/lib/libaetpkss.so:/usr/lib/libaetpkss.so:ro
+#   -v /run/pcscd/pcscd.comm:/run/pcscd/pcscd.comm
+# Detalhes de deploy ficam no Plano 2.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim AS runtime
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl tini \
  && rm -rf /var/lib/apt/lists/*
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+RUN adduser --disabled-password --gecos "" --home /app app
 
-# Diretórios
-WORKDIR /app
-RUN adduser --disabled-password --gecos "" --home /app app && chown -R app:app /app
+COPY --from=builder /out/pjeheadless /app/pjeheadless
 
-# Copia projeto
-COPY pyproject.toml README.md /app/
-COPY pjeoffice_headless.py /app/
-
-# Instala dependências
-RUN pip install --no-cache-dir --upgrade pip \
- && pip install --no-cache-dir .
-
-# Labels OCI
-LABEL org.opencontainers.image.title="pjeoffice-headless" \
-      org.opencontainers.image.description="Autenticador headless PJe Office (CNJ) que assina desafios via certificado A1 (PKCS#12)" \
-      org.opencontainers.image.licenses="GNU General Public License v3.0" \
-      org.opencontainers.image.version="1.0.0"
-
-# Entrypoint (env -> flags)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+WORKDIR /app
+
 EXPOSE 8800
+
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:${PJE_PORT:-8800}/pjeOffice/ || exit 1
+  CMD curl -fsS http://127.0.0.1:${PJE_PJEOFFICE_PORT:-8800}/pjeOffice/ || exit 1
+
+LABEL org.opencontainers.image.title="pjeoffice-headless" \
+      org.opencontainers.image.description="Autenticador headless PJeOffice (CNJ) com assinatura dual A1/A3" \
+      org.opencontainers.image.licenses="GPL-3.0-only" \
+      org.opencontainers.image.version="2.0.0"
 
 USER app
-ENTRYPOINT ["/usr/bin/tini","--","/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

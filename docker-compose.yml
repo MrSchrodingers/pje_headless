@@ -1,14 +1,28 @@
 services:
   pjeoffice-headless:
     build: .
-    image: pjeoffice-headless:0.1.0
+    image: pjeoffice-headless:2.0
     container_name: pjeoffice-headless
     environment:
-      PJE_CERT_PATH: /certs/cert.pfx
-      PJE_CERT_PASS: "sua-senha-aqui"
-      PJE_PORT: "8800"
+      # Selecione o backend de assinatura: "pfx", "pkcs11" ou "pkcs11,pfx"
+      PJE_SIGNER_PRIORITY: "pfx"
+      # Caminho do PFX montado no container (ver volumes abaixo)
+      PJE_PFX_PATH: "/run/secrets/cert.pfx"
+      # PJE_PFX_PASS: defina via --env-file ou Docker secret; nao coloque aqui
+      # PJE_PKCS11_PIN: idem
+      # Para token A3, adicionar tambem:
+      #   PJE_PKCS11_MODULE: /usr/lib/libaetpkss.so
+      #   PJE_PKCS11_SLOT: "0"
+      PJE_PJEOFFICE_PORT: "8800"
+      PJE_BIND_ADDR: "0.0.0.0"   # dentro do container; porta mapeada so em loopback abaixo
     volumes:
-      - ./secrets/24853997.pfx:/certs/cert.pfx:ro
+      # Monte o certificado PFX em modo somente-leitura.
+      # Substitua o caminho do host pelo caminho real do seu certificado.
+      # Exemplo: - /caminho/do/host/cert.pfx:/run/secrets/cert.pfx:ro
+      - /dev/null:/run/secrets/cert.pfx:ro   # placeholder — substitua antes de usar
+      # Para token A3 (Plano 2), adicionar:
+      #   - /usr/lib/libaetpkss.so:/usr/lib/libaetpkss.so:ro
+      #   - /run/pcscd/pcscd.comm:/run/pcscd/pcscd.comm
     ports:
       - "127.0.0.1:8800:8800"
     restart: unless-stopped
