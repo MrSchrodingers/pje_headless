@@ -1,6 +1,7 @@
 package signer_test
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -157,4 +159,76 @@ func TestPFXIdentity(t *testing.T) {
 	if id.NotAfter.IsZero() {
 		t.Error("expected non-zero NotAfter")
 	}
+	// Self-signed certificate: Issuer must equal Subject.
+	if id.Issuer == "" {
+		t.Error("expected non-empty Issuer")
+	}
+	if id.Issuer != id.Subject {
+		t.Errorf("self-signed: Issuer %q != Subject %q", id.Issuer, id.Subject)
+	}
+	if id.Serial == "" {
+		t.Error("expected non-empty Serial")
+	}
+}
+
+// TestPFXCertChainPKIPath verifies the observable behaviour of CertChainPKIPath:
+// (a) the returned string is non-empty after Login; (b) decoding the base64 yields
+// bytes that begin with the leaf certificate DER (current DER-concatenation
+// placeholder — format will change in Task 3).
+func TestPFXCertChainPKIPath(t *testing.T) {
+	pfxPath, certDER := makePFX(t, "senha")
+
+	s := signer.NewPFXSigner(pfxPath, "senha", "")
+	if err := s.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	b64, err := s.CertChainPKIPath(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b64 == "" {
+		t.Fatal("expected non-empty CertChainPKIPath result")
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		t.Fatalf("base64 decode: %v", err)
+	}
+
+	if len(raw) < len(certDER) {
+		t.Fatalf("decoded chain too short: got %d bytes, want at least %d", len(raw), len(certDER))
+	}
+	// The leaf DER must be the prefix of the concatenated bytes.
+	if !bytes.Equal(raw[:len(certDER)], certDER) {
+		t.Fatal("decoded chain does not begin with leaf certificate DER")
+	}
+}
+
+// TestPFXConcurrentLoginSign exercises Login and Sign running in parallel to
+// expose data races caught by the race detector (go test -race).
+func TestPFXConcurrentLoginSign(t *testing.T) {
+	pfxPath, _ := makePFX(t, "senha")
+
+	s := signer.NewPFXSigner(pfxPath, "senha", "")
+	// Warm-up: ensure Sign sees a non-nil key even if it races ahead of Login.
+	if err := s.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_ = s.Login(context.Background())
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = s.Sign(context.Background(), "nonce", "SHA256withRSA")
+		}()
+	}
+	wg.Wait()
 }

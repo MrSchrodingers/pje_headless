@@ -3,27 +3,32 @@ package signer
 import (
 	"context"
 	"crypto"
-	"crypto/md5"
+	"crypto/md5" // #nosec G501
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1"
+	"crypto/sha1" // #nosec G501
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
 	pkcs12 "software.sslmate.com/src/go-pkcs12"
 )
 
 // PFXSigner implements Signer backed by a PKCS#12 (.pfx) file.
 // Zero value is not usable; construct via NewPFXSigner.
+// mu guards the mutable credential fields (key, cert, chain) so that
+// Login (write) and Sign/Identity/CertChainPKIPath/Available (read) can
+// run concurrently without data races.
 type PFXSigner struct {
 	path     string
 	pass     string
 	chainDir string
 
+	mu    sync.RWMutex
 	key   *rsa.PrivateKey
 	cert  *x509.Certificate
 	chain []*x509.Certificate
@@ -58,16 +63,22 @@ func (s *PFXSigner) Login(_ context.Context) error {
 		return errors.New("pfx login: private key is not RSA")
 	}
 
+	s.mu.Lock()
 	s.key = rsaKey
 	s.cert = cert
 	s.chain = chain
+	s.mu.Unlock()
 	return nil
 }
 
 // Sign hashes phrase with the requested algorithm and returns a base64-encoded
 // PKCS#1 v1.5 RSA signature. Login must be called first.
 func (s *PFXSigner) Sign(_ context.Context, phrase, algorithm string) (string, error) {
-	if s.key == nil {
+	s.mu.RLock()
+	key := s.key
+	s.mu.RUnlock()
+
+	if key == nil {
 		return "", errors.New("pfx sign: not logged in")
 	}
 
@@ -76,7 +87,7 @@ func (s *PFXSigner) Sign(_ context.Context, phrase, algorithm string) (string, e
 		return "", err
 	}
 
-	sig, err := rsa.SignPKCS1v15(rand.Reader, s.key, cryptoHash, h)
+	sig, err := rsa.SignPKCS1v15(rand.Reader, key, cryptoHash, h)
 	if err != nil {
 		return "", fmt.Errorf("pfx sign: %w", err)
 	}
@@ -84,14 +95,21 @@ func (s *PFXSigner) Sign(_ context.Context, phrase, algorithm string) (string, e
 	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
-// CertChainPKIPath returns the base64-encoded DER concatenation of the
-// certificate chain (leaf first, then intermediates). Login must be called first.
+// CertChainPKIPath returns the base64-encoded certificate chain (leaf first).
+// TODO(task-3): replace with PKIPathB64 (ASN.1 SEQUENCE OF Certificate, RFC 3820).
+// Current implementation concatenates raw DER bytes — a placeholder only.
+// Login must be called first.
 func (s *PFXSigner) CertChainPKIPath(_ context.Context) (string, error) {
-	if s.cert == nil {
+	s.mu.RLock()
+	cert := s.cert
+	chain := s.chain
+	s.mu.RUnlock()
+
+	if cert == nil {
 		return "", errors.New("pfx chain: not logged in")
 	}
 
-	all := append([]*x509.Certificate{s.cert}, s.chain...)
+	all := append([]*x509.Certificate{cert}, chain...)
 	var der []byte
 	for _, c := range all {
 		der = append(der, c.Raw...)
@@ -103,21 +121,28 @@ func (s *PFXSigner) CertChainPKIPath(_ context.Context) (string, error) {
 // Identity returns Subject, Issuer, Serial and NotAfter from the leaf cert.
 // Login must be called first.
 func (s *PFXSigner) Identity(_ context.Context) (Identity, error) {
-	if s.cert == nil {
+	s.mu.RLock()
+	cert := s.cert
+	s.mu.RUnlock()
+
+	if cert == nil {
 		return Identity{}, errors.New("pfx identity: not logged in")
 	}
 
 	return Identity{
-		Subject:  s.cert.Subject.String(),
-		Issuer:   s.cert.Issuer.String(),
-		Serial:   s.cert.SerialNumber.String(),
-		NotAfter: s.cert.NotAfter,
+		Subject:  cert.Subject.String(),
+		Issuer:   cert.Issuer.String(),
+		Serial:   cert.SerialNumber.String(),
+		NotAfter: cert.NotAfter,
 	}, nil
 }
 
 // Available probes the PFX without mutating the receiver. Returns true only
 // when the file exists and can be decoded with the stored password.
 func (s *PFXSigner) Available(_ context.Context) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return false
@@ -132,11 +157,10 @@ func (s *PFXSigner) Available(_ context.Context) bool {
 func digest(algorithm string, data []byte) ([]byte, crypto.Hash, error) {
 	switch algorithm {
 	case "MD5withRSA":
-		h := md5.Sum(data)
+		h := md5.Sum(data) // #nosec G401
 		return h[:], crypto.MD5, nil
 	case "SHA1withRSA":
-		// #nosec G401 -- SHA1 retained for legacy PJe compatibility only.
-		h := sha1.Sum(data)
+		h := sha1.Sum(data) // #nosec G401 -- SHA1 retained for legacy PJe compatibility only.
 		return h[:], crypto.SHA1, nil
 	case "SHA256withRSA":
 		h := sha256.Sum256(data)

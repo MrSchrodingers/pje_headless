@@ -22,8 +22,8 @@ type Signer interface {
 	// Supported algorithms: MD5withRSA, SHA1withRSA, SHA256withRSA.
 	Sign(ctx context.Context, phrase, algorithm string) (string, error)
 
-	// CertChainPKIPath returns the base64-encoded DER concatenation of the
-	// certificate chain (leaf first).
+	// CertChainPKIPath returns the ASN.1 PKIPath (SEQUENCE OF Certificate,
+	// RFC 3820) of the certificate chain (leaf first), base64-encoded.
 	CertChainPKIPath(ctx context.Context) (string, error)
 
 	// Identity returns human-readable certificate metadata.
