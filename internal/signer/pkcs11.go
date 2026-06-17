@@ -110,10 +110,13 @@ func (s *PKCS11Signer) Login(_ context.Context) error {
 	}
 
 	if err := ctx.Login(sh, p11.CKU_USER, s.pin); err != nil {
-		_ = ctx.CloseSession(sh)
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: C_Login: %w", err)
+		if !alreadyLoggedIn(err) {
+			_ = ctx.CloseSession(sh)
+			_ = ctx.Finalize()
+			ctx.Destroy()
+			return fmt.Errorf("pkcs11 login: C_Login: %w", err)
+		}
+		// token already authenticated on this module — treat as success
 	}
 
 	privKey, err := findObject(ctx, sh, p11.CKO_PRIVATE_KEY)
@@ -358,6 +361,15 @@ func findSlot(ctx *p11.Ctx, label, slotHint string) (uint, error) {
 	}
 
 	return slots[0], nil
+}
+
+// alreadyLoggedIn reports whether err is CKR_USER_ALREADY_LOGGED_IN (0x100).
+// When C_Login returns this code the token already has an authenticated session
+// (the module maintains per-token login state across sessions/instances), so
+// Login should treat it as success rather than propagating an error.
+func alreadyLoggedIn(err error) bool {
+	e, ok := err.(p11.Error)
+	return ok && e == p11.CKR_USER_ALREADY_LOGGED_IN
 }
 
 // findObject locates the first PKCS#11 object of the given class

@@ -9,6 +9,7 @@ package signer
 import (
 	"crypto/md5" // #nosec G401
 	"encoding/asn1"
+	"errors"
 	"testing"
 
 	p11 "github.com/miekg/pkcs11"
@@ -118,4 +119,34 @@ func TestMD5DigestInfoEdgeCases(t *testing.T) {
 			t.Errorf("empty input hash byte[%d] = 0x%02x, want 0x%02x", i, out[18+i], b)
 		}
 	}
+}
+
+// TestAlreadyLoggedIn verifies the observable behaviour of alreadyLoggedIn:
+// the function must classify CKR_USER_ALREADY_LOGGED_IN as "already logged in"
+// (return true) and must NOT classify any other error code or non-pkcs11 error
+// that way (return false).
+//
+// This covers the Login idempotency fix: when C_Login returns 0x100 the caller
+// must treat the session as authenticated rather than propagating an error.
+func TestAlreadyLoggedIn(t *testing.T) {
+	t.Run("CKR_USER_ALREADY_LOGGED_IN is treated as success", func(t *testing.T) {
+		err := p11.Error(p11.CKR_USER_ALREADY_LOGGED_IN) // 0x100
+		if !alreadyLoggedIn(err) {
+			t.Fatalf("alreadyLoggedIn(%v) = false; want true for CKR_USER_ALREADY_LOGGED_IN", err)
+		}
+	})
+
+	t.Run("different pkcs11 error code is not treated as success", func(t *testing.T) {
+		err := p11.Error(p11.CKR_PIN_INCORRECT)
+		if alreadyLoggedIn(err) {
+			t.Fatalf("alreadyLoggedIn(%v) = true; want false for CKR_PIN_INCORRECT", err)
+		}
+	})
+
+	t.Run("non-pkcs11 error is not treated as success", func(t *testing.T) {
+		err := errors.New("some unrelated error")
+		if alreadyLoggedIn(err) {
+			t.Fatalf("alreadyLoggedIn(%v) = true; want false for a plain error", err)
+		}
+	})
 }
