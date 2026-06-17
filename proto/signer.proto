@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package signer;
+
+option go_package = "github.com/MrSchrodingers/pje_headless/internal/signerpb";
+
+// SignerService exposes the credential-backed signing operations over gRPC.
+// It is designed to run on the host that holds the hardware token or PFX file
+// (srvtoken side) and to be called by RemoteSigner running on the pjeheadless
+// process.
+//
+// SECURITY: transport is plain TCP by default, acceptable only on a trusted
+// LAN segment or loopback. mTLS hardening is tracked as a backlog item.
+// Do NOT expose this service on an untrusted network without TLS.
+service SignerService {
+  // Sign hashes phrase with the given algorithm and returns a base64-encoded
+  // PKCS#1 v1.5 signature.
+  rpc Sign(SignRequest) returns (SignReply);
+
+  // CertChainPKIPath returns the ASN.1 PKIPath (SEQUENCE OF Certificate,
+  // RFC 3820) of the certificate chain (leaf first), base64-encoded.
+  rpc CertChainPKIPath(Empty) returns (Chain);
+
+  // Identity returns human-readable metadata from the leaf certificate.
+  rpc Identity(Empty) returns (IdentityMsg);
+
+  // Health probes liveness and readiness without mutating state.
+  rpc Health(Empty) returns (HealthStatus);
+}
+
+message Empty {}
+
+message SignRequest {
+  string phrase    = 1;
+  string algorithm = 2;
+}
+
+message SignReply {
+  string signature_b64 = 1;
+}
+
+message Chain {
+  string pkipath_b64 = 1;
+}
+
+message IdentityMsg {
+  string subject      = 1;
+  string issuer       = 2;
+  string serial       = 3;
+  int64  not_after_unix = 4;
+}
+
+message HealthStatus {
+  bool   ready            = 1;
+  string identity_subject = 2;
+}
