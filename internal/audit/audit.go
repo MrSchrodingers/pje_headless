@@ -9,6 +9,6 @@ func New(w io.Writer) *slog.Logger {
 	return slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
-func IdentitySwitch(log *slog.Logger, from, to string) {
-	log.Warn("identidade ativa alterada", "event", "identity_switch", "from", from, "to", to)
+func IdentitySwitch(logger *slog.Logger, from, to string) {
+	logger.Warn("identidade ativa alterada", "event", "identity_switch", "from", from, "to", to)
 }

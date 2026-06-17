@@ -13,8 +13,11 @@ func TestIdentitySwitchLogsWarn(t *testing.T) {
 	log := audit.New(&buf)
 	audit.IdentitySwitch(log, "Marcos", "Bruna")
 	out := buf.String()
-	if !strings.Contains(out, `"level":"WARN"`) || !strings.Contains(out, "Marcos") || !strings.Contains(out, "Bruna") {
-		t.Fatalf("esperado WARN com from/to; got %s", out)
+	if !strings.Contains(out, `"level":"WARN"`) ||
+		!strings.Contains(out, `"event":"identity_switch"`) ||
+		!strings.Contains(out, `"from":"Marcos"`) ||
+		!strings.Contains(out, `"to":"Bruna"`) {
+		t.Fatalf("esperado WARN com event/from/to corretos; got %s", out)
 	}
 }
 
