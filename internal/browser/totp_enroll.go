@@ -29,6 +29,21 @@ var totpSecretSelectors = []string{
 	"[name=totpSecret] / #totpSecret",
 }
 
+// totpSecretWaitSelectors returns the CSS selectors the enroll step waits on, in
+// priority order, to confirm the freshly navigated CONFIGURE_TOTP DOM is ready
+// before it reads the secret. The visible span #kc-totp-secret-key is the primary
+// readiness signal (Keycloak's login-config-totp.ftl renders the base32 secret
+// there), so it is tried first; the hidden totpSecret input is the fallback for
+// page variants that omit the visible span. Each entry is a valid
+// DOM.querySelector string. Reading the secret before one of these exists is the
+// observed "invalid context"/empty-read failure this wait guards against.
+func totpSecretWaitSelectors() []string {
+	return []string{
+		"#kc-totp-secret-key",
+		"#totpSecret, [name=totpSecret]",
+	}
+}
+
 // chooseTOTPSecret selects the enrollment secret from the two candidates the
 // Keycloak login-config-totp.ftl page exposes: the visible, space-grouped
 // base32 string inside <span id="kc-totp-secret-key"> (spanText) and the raw
@@ -52,25 +67,60 @@ func chooseTOTPSecret(spanText, hiddenValue string) (string, error) {
 	)
 }
 
-// maybeEnrollTOTP handles the Keycloak CONFIGURE_TOTP required-action page: it
-// reads the freshly generated enrollment secret from the page, computes the
-// current code, fills the code and device-label fields, and submits the form so
-// the SSO can finish redirecting to jus.br. It returns true when it submitted
-// the enrollment (so the caller backs off and lets awaitAuthenticated keep
-// polling), false when the current page is not a CONFIGURE_TOTP page.
+// maybeEnrollTOTP handles the Keycloak CONFIGURE_TOTP required-action page. The
+// detection upstream is passive (URL from page.EventFrameNavigated), so by the
+// time this runs the CONFIGURE_TOTP target has just navigated and the polling
+// loop's context points at the dead pre-navigation target. This function therefore
+// REBINDS to the live page target first, WAITS for the enroll DOM to be ready, then
+// reads the freshly generated enrollment secret, computes the current code, fills
+// the code and device-label fields, and submits the form -- all on the rebound
+// context. It returns true when it submitted the enrollment (so the caller backs
+// off and lets awaitAuthenticated keep polling), and (false, nil) both when the
+// current page is not a CONFIGURE_TOTP page and on a transient invalid-context /
+// not-yet-ready DOM (so enrollTOTPRobust rebinds and retries within its window).
+// Each sub-step is logged at INFO so a live run is never silent about where it stalls.
 //
 // Unlike maybeHandle2FA (which needs a pre-shared secret to type an existing
 // device's code), enrollment reads the secret the server just minted from the
 // page itself; no PJE_2FA_TOTP_SECRET is required. The minted secret is the
 // deliverable: it is logged at INFO so the operator can persist it for future
 // logins. This is the one place a secret is intentionally logged.
-func (b *Browser) maybeEnrollTOTP(ctx context.Context, cur string, enrolled *bool) (bool, error) {
+func (b *Browser) maybeEnrollTOTP(sess *session, cur string, enrolled *bool) (bool, error) {
 	if *enrolled {
 		return false, nil
 	}
 	if !strings.Contains(cur, configureTOTPMarker) {
 		return false, nil
 	}
+
+	// The CONFIGURE_TOTP target just navigated; the context the polling loop was
+	// using points at the dead pre-navigation target. REBIND to the live page
+	// target before any Evaluate, so every active enroll Action below runs in a
+	// valid execution context. rebound=false (no new target yet, or already bound)
+	// is not fatal: we proceed against the current active context and let the
+	// outer retry rebind again on transient invalid-context.
+	if rebound, err := sess.rebind(); err != nil {
+		return false, err
+	} else if rebound {
+		b.log.Info("CONFIGURE_TOTP: rebound to live target")
+	}
+	ctx := sess.active()
+
+	// Wait for the enroll DOM to exist before reading. WaitReady/WaitVisible block
+	// until the element appears OR the context deadline fires, so the wait runs on
+	// a child context with its own short deadline: a missing element returns from
+	// the wait quickly (letting the outer window rebind/retry) instead of blocking
+	// the whole enroll window on one stale target.
+	if err := waitTOTPSecretReady(ctx); err != nil {
+		if isInvalidContext(err) {
+			// Target swapped while waiting; let the outer loop rebind and retry.
+			return false, nil
+		}
+		// Element never appeared on this target within the per-attempt wait; not a
+		// hard failure, the outer window rebinds and retries.
+		return false, nil
+	}
+	b.log.Info("CONFIGURE_TOTP: secret element visible")
 
 	span, hidden, err := readTOTPSecretCandidates(ctx)
 	if err != nil {
@@ -85,11 +135,15 @@ func (b *Browser) maybeEnrollTOTP(ctx context.Context, cur string, enrolled *boo
 	if err != nil {
 		return false, err
 	}
+	// The minted secret is the deliverable: the operator MUST persist it to log
+	// in again without re-enrolling. This is the single intentional secret log.
+	b.log.Info("CONFIGURE_TOTP: secret read", "PJE_2FA_TOTP_SECRET", secret)
 
 	code, err := totpNow(secret)
 	if err != nil {
 		return false, fmt.Errorf("browser: generate TOTP for enrollment: %w", err)
 	}
+	b.log.Info("CONFIGURE_TOTP: enrollment code generated")
 
 	ok, err := submitTOTPEnrollment(ctx, code)
 	if err != nil {
@@ -99,14 +153,63 @@ func (b *Browser) maybeEnrollTOTP(ctx context.Context, cur string, enrolled *boo
 		return false, fmt.Errorf("browser: submit CONFIGURE_TOTP: %w", err)
 	}
 	if !ok {
-		return false, errors.New("browser: CONFIGURE_TOTP page present but the enrollment form could not be filled/submitted")
+		// The secret element was present but the code/submit field was not yet on
+		// this target; let the outer window rebind and retry instead of failing the
+		// whole login on a transient half-rendered form.
+		return false, nil
 	}
 
 	*enrolled = true
-	// The minted secret is the deliverable: the operator MUST persist it to log
-	// in again without re-enrolling. This is the single intentional secret log.
-	b.log.Info("TOTP cadastrado", "PJE_2FA_TOTP_SECRET", secret)
+	b.log.Info("CONFIGURE_TOTP: enrollment form submitted")
 	return true, nil
+}
+
+// totpSecretWaitTimeout bounds the per-attempt wait for the enroll DOM. It is the
+// child-context deadline given to waitTOTPSecretReady so a stale or half-rendered
+// target returns from the wait quickly, letting enrollTOTPRobust rebind to a fresh
+// target rather than blocking the whole enroll window on one dead context.
+const totpSecretWaitTimeout = 8 * time.Second
+
+// waitTOTPSecretReady blocks until the CONFIGURE_TOTP enroll DOM is ready on ctx:
+// first the document body, then the secret element identified by
+// totpSecretWaitSelectors (the visible span, then the hidden-input fallback). It
+// runs on child contexts each bounded by totpSecretWaitTimeout so a target where
+// the element never appears returns promptly with a deadline error instead of
+// hanging until the outer window expires.
+//
+// chromedp.WaitReady blocks until its element exists OR the context deadline
+// fires, so each selector gets its OWN bounded child context: a span that never
+// renders does not consume the whole budget and starve the hidden-input fallback.
+// It returns nil as soon as any selector is ready, and propagates invalid-context
+// immediately so the caller can rebind.
+func waitTOTPSecretReady(ctx context.Context) error {
+	if err := waitReadyBounded(ctx, "body"); err != nil {
+		return err
+	}
+
+	var lastErr error
+	for _, sel := range totpSecretWaitSelectors() {
+		err := waitReadyBounded(ctx, sel)
+		if err == nil {
+			return nil
+		}
+		if isInvalidContext(err) {
+			return err // dead target: stop and let the caller rebind
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("browser: no CONFIGURE_TOTP secret selector to wait on")
+	}
+	return lastErr
+}
+
+// waitReadyBounded runs chromedp.WaitReady(sel) on a child context bounded by
+// totpSecretWaitTimeout so the wait cannot block past the per-attempt budget.
+func waitReadyBounded(ctx context.Context, sel string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, totpSecretWaitTimeout)
+	defer cancel()
+	return chromedp.WaitReady(sel, chromedp.ByQuery).Do(waitCtx)
 }
 
 // readTOTPSecretCandidates extracts both secret candidates from the page in one
@@ -168,11 +271,16 @@ func submitTOTPEnrollment(ctx context.Context, code string) (bool, error) {
 const enrollTOTPBackoff = 5 * time.Second
 
 // enrollRetryWindow bounds enrollTOTPRobust: once a CONFIGURE_TOTP URL is
-// observed, the enroll Actions (read the minted secret, type the code, submit)
-// are retried against a fresh live target on transient invalid-context until
-// this sub-deadline. If the secret/form never becomes readable in this window,
-// the login fails loudly rather than spinning until the outer 3-minute timeout.
-const enrollRetryWindow = 30 * time.Second
+// observed, the enroll Actions (rebind to the live target, wait for the enroll
+// DOM, read the minted secret, type the code, submit) are retried against a fresh
+// live target on transient invalid-context / not-yet-ready DOM until this
+// sub-deadline. Widened from 30s to 60s because each attempt now spends time
+// waiting for the freshly navigated CONFIGURE_TOTP DOM (totpSecretWaitTimeout per
+// selector) before it can read; 30s left too few retries when the first target
+// was the dead pre-navigation one. If the secret/form never becomes readable in
+// this window, the login fails loudly rather than spinning until the outer
+// 3-minute timeout.
+const enrollRetryWindow = 60 * time.Second
 
 // enrollRetryBackoff is the pause between enroll attempts inside the retry
 // window, giving a swapped target time to settle before the next read.

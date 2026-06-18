@@ -66,3 +66,37 @@ func TestChooseTOTPSecretBothEmptyFailsLoudly(t *testing.T) {
 		}
 	}
 }
+
+// TestTOTPEnrollWaitSelectorsOrder pins the priority order in which the enroll
+// step waits for the secret element to exist before reading it. The Keycloak
+// login-config-totp.ftl page renders the base32 secret in the visible span
+// #kc-totp-secret-key; that span is the primary signal the DOM is ready and the
+// secret is present, so it MUST be tried first. The hidden input
+// ([name=totpSecret] / #totpSecret) is the documented fallback for page variants
+// that omit the visible span, so it MUST come after. This order is the contract
+// the wait/read logic follows; a regression that flips it would make the step
+// wait on the wrong element and read before the secret span exists. The selectors
+// must also be valid querySelector strings (the wait runs them via DOM.querySelector).
+func TestTOTPEnrollWaitSelectorsOrder(t *testing.T) {
+	sels := totpSecretWaitSelectors()
+	if len(sels) < 2 {
+		t.Fatalf("expected at least the span selector plus a hidden-input fallback, got %d: %v", len(sels), sels)
+	}
+	if sels[0] != "#kc-totp-secret-key" {
+		t.Fatalf("first wait selector = %q, want the visible span #kc-totp-secret-key (primary readiness signal)", sels[0])
+	}
+	// Every later selector is a fallback and must reference the hidden totpSecret
+	// input, not re-wait on the span.
+	for _, s := range sels[1:] {
+		if !strings.Contains(s, "totpSecret") {
+			t.Fatalf("fallback wait selector %q must target the hidden totpSecret input", s)
+		}
+	}
+	// The selectors are fed to DOM.querySelector verbatim; an empty or whitespace
+	// selector would silently match nothing and stall the wait.
+	for _, s := range sels {
+		if strings.TrimSpace(s) == "" {
+			t.Fatalf("wait selector %q is blank; DOM.querySelector would never match", s)
+		}
+	}
+}

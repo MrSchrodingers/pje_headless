@@ -414,29 +414,34 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 	return errors.New("browser: timed out waiting for SSO redirect / 2FA completion")
 }
 
-// enrollTOTPRobust drives maybeEnrollTOTP against the session's active page
-// target, re-trying on a transient invalid-context error by rebinding to a fresh
-// live target until a short sub-deadline. maybeEnrollTOTP already swallows
-// invalid-context internally (returning enrolled=false, err=nil); this wrapper
-// adds the rebind-and-retry so a target swap mid-enroll does not silently leave
-// the form unfilled. A real failure (secret not found, form not submittable)
-// propagates immediately.
+// enrollTOTPRobust drives maybeEnrollTOTP against the session until enrollment
+// is submitted or enrollRetryWindow expires. Each attempt, maybeEnrollTOTP first
+// rebinds to the live page target (the CONFIGURE_TOTP target just navigated, so
+// the polling loop's context points at the dead pre-navigation target), waits for
+// the enroll DOM, then reads the secret, generates the code and submits the form
+// -- all on the rebound context. maybeEnrollTOTP returns (false, nil) on transient
+// invalid-context or a not-yet-ready DOM; this wrapper rebinds again and retries
+// within the window so a target swap mid-enroll does not silently leave the form
+// unfilled. A real failure (secret present but unreadable, hard CDP error)
+// propagates immediately; exhausting the window fails loudly.
 func (b *Browser) enrollTOTPRobust(sess *session, cur string, enrolled *bool) (bool, error) {
 	subDeadline := time.Now().Add(enrollRetryWindow)
 	attempt := 0
 	for time.Now().Before(subDeadline) {
 		attempt++
-		ok, err := b.maybeEnrollTOTP(sess.active(), cur, enrolled)
+		// maybeEnrollTOTP rebinds to the live target as its first action, waits for
+		// the enroll DOM, then reads the secret, generates the code and submits the
+		// form -- all on the rebound context. It returns (false, nil) on transient
+		// invalid-context or a not-yet-ready DOM so this window can retry.
+		ok, err := b.maybeEnrollTOTP(sess, cur, enrolled)
 		if err != nil {
 			return false, err
 		}
 		if ok {
 			return true, nil
 		}
-		// Not enrolled and no hard error: either not a CONFIGURE_TOTP page (the
-		// caller already checked, so this is a transient invalid-context the
-		// enroll swallowed) or the secret/form was not ready yet. Rebind to a
-		// live target and retry.
+		// Not enrolled and no hard error: the target swapped or the secret/form was
+		// not ready yet. Rebind to a live target and retry within the window.
 		b.log.Info("CONFIGURE_TOTP enroll attempt did not submit; retrying", "attempt", attempt)
 		if _, rebindErr := sess.rebind(); rebindErr != nil {
 			return false, rebindErr
