@@ -50,6 +50,16 @@ func runFull(cfg config.Config, log *slog.Logger) {
 // interface via PJE_GRPC_ADDR. mTLS is a backlog hardening item.
 func runSignerOnly(cfg config.Config, log *slog.Logger) {
 	s := buildSigner(cfg, log)
+
+	// Login eager no token na inicializacao: assim o Health reporta "ready" e o
+	// RemoteSigner do consumidor nao aborta com "server not ready". Fail-fast: um
+	// PIN errado ou token ausente quebra aqui, na partida, e nao no meio do fluxo.
+	if err := s.Login(context.Background()); err != nil {
+		log.Error("signer-only: falha ao autenticar no token na inicializacao", "err", err)
+		os.Exit(1)
+	}
+	log.Info("signer-only: token autenticado e pronto")
+
 	srv := grpcsigner.NewSignerServiceServer(s, log)
 
 	log.Info("modo signer-only: iniciando gRPC", "addr", cfg.GRPCAddr)

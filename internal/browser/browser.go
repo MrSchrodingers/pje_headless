@@ -219,6 +219,13 @@ func (b *Browser) allocatorOptions() []chromedp.ExecAllocatorOption {
 		chromedp.DisableGPU,
 		chromedp.WindowSize(1920, 1080),
 		chromedp.UserAgent(userAgent),
+		// O handshake do PJeOffice carrega uma imagem de http://localhost:8800 a
+		// partir da pagina HTTPS do SSO. O Chrome (Private/Local Network Access)
+		// bloqueia requests publico->loopback ("access the loopback address
+		// space") e o handshake morre antes de chegar ao :8800. Desabilitamos as
+		// features de PNA/LNA e permitimos conteudo inseguro para o fluxo headless.
+		chromedp.Flag("disable-features", "BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults,LocalNetworkAccessChecks"),
+		chromedp.Flag("allow-running-insecure-content", true),
 	}
 	if b.cfg.ChromePath != "" {
 		opts = append(opts, chromedp.ExecPath(b.cfg.ChromePath))
