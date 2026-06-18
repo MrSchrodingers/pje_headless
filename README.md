@@ -207,6 +207,30 @@ PJE_LOGIN_GRPC_ADDR=127.0.0.1:9091 \
 
 ---
 
+## 2FA (TOTP)
+
+Os modos de login (`login` e `login-service`) tratam o segundo fator
+automaticamente quando a conta exige TOTP:
+
+- **Login recorrente.** O codigo de 6 digitos e calculado a cada login a partir
+  de `PJE_2FA_TOTP_SECRET` (segredo base32, RFC 6238, janela de 30s). Defina essa
+  variavel com o segredo da conta; sem ela, um login que exija 2FA falha com erro
+  explicito (nao submete codigo em branco).
+- **Primeiro cadastro (enrollment).** Se a conta ainda nao tem autenticador e o
+  SSO exige o cadastro (required-action `CONFIGURE_TOTP`), o servico cadastra um
+  novo dispositivo TOTP sozinho e registra UMA unica vez, em log `INFO`, o segredo
+  cunhado (`PJE_2FA_TOTP_SECRET=<segredo>`). Esse segredo e o entregavel: persista-o
+  com seguranca (cofre/secret de runtime) e informe-o em `PJE_2FA_TOTP_SECRET` nos
+  logins seguintes. So este ponto registra o segredo; o codigo de 6 digitos nunca
+  e logado pelo fluxo.
+
+O segredo TOTP e uma credencial: trate-o como `.env`/secret de runtime e nunca o
+versione (ver "Seguranca"). Para um login MANUAL no navegador (fora do fluxo
+headless), o codigo atual pode ser derivado do mesmo segredo base32 por qualquer
+gerador TOTP RFC 6238.
+
+---
+
 ## Endpoints
 
 ### `GET /pjeOffice/`
