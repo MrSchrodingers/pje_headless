@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,46 +24,62 @@ const totpDeviceLabel = "pje-headless-robot"
 
 // totpSecretSelectors lists, for error messages, the page locations this package
 // reads the enrollment secret from, in priority order. Kept in sync with the
-// extraction JS in enrollTOTP so a failure names exactly what was tried.
+// extraction JS in readTOTPSecretCandidates so a failure names exactly what was
+// tried. The hidden totpSecret input (the raw shared key) is the authoritative
+// source on jus.br and comes first; the visible #kc-totp-secret-key span (the
+// base32 display) is the fallback.
 var totpSecretSelectors = []string{
-	"#kc-totp-secret-key",
-	"[name=totpSecret] / #totpSecret",
+	"[name=totpSecret] / #totpSecret (raw key)",
+	"#kc-totp-secret-key (base32 span)",
 }
 
 // totpSecretWaitSelectors returns the CSS selectors the enroll step waits on, in
 // priority order, to confirm the freshly navigated CONFIGURE_TOTP DOM is ready
-// before it reads the secret. The visible span #kc-totp-secret-key is the primary
-// readiness signal (Keycloak's login-config-totp.ftl renders the base32 secret
-// there), so it is tried first; the hidden totpSecret input is the fallback for
-// page variants that omit the visible span. Each entry is a valid
-// DOM.querySelector string. Reading the secret before one of these exists is the
-// observed "invalid context"/empty-read failure this wait guards against.
+// before it reads the secret. The hidden totpSecret input is the authoritative,
+// reliably-present source on jus.br (it carries the raw shared key), so it is the
+// primary readiness signal and is tried first; the visible #kc-totp-secret-key
+// span (the base32 display) is the fallback, since live runs showed it can be
+// empty. Each entry is a valid DOM.querySelector string. Reading the secret
+// before one of these exists is the observed "invalid context"/empty-read failure
+// this wait guards against. WaitReady only requires the node to exist in the DOM
+// (not to be visible), so it is satisfied by the hidden input.
 func totpSecretWaitSelectors() []string {
 	return []string{
-		"#kc-totp-secret-key",
 		"#totpSecret, [name=totpSecret]",
+		"#kc-totp-secret-key",
 	}
 }
 
-// chooseTOTPSecret selects the enrollment secret from the two candidates the
-// Keycloak login-config-totp.ftl page exposes: the visible, space-grouped
-// base32 string inside <span id="kc-totp-secret-key"> (spanText) and the raw
-// value of the hidden totpSecret input (hiddenValue). The visible span wins when
-// non-empty; otherwise the hidden value is used. The chosen candidate is
-// normalized (whitespace stripped, upper-cased) so it decodes as base32 and
-// drives totpNow.
+// chooseTOTPSecret derives the base32 TOTP secret from the two candidates the
+// Keycloak login-config-totp.ftl page exposes: the value of the hidden totpSecret
+// input (hiddenValue) and the textContent of <span id="kc-totp-secret-key">
+// (spanText).
 //
-// When neither candidate yields a non-empty secret the function fails with an
-// error naming the selectors it tried, because a CONFIGURE_TOTP page with no
-// readable secret must stop the flow loudly rather than enroll a blank code.
+// Keycloak's hidden totpSecret holds the RAW shared key -- HmacOTP.generateSecret
+// returns a random a-zA-Z0-9 string, and the server validates the submitted code
+// with secret.getBytes(), while the QR/authenticator secret is
+// Base32.encode(totpSecret.getBytes()). So the literal bytes of hiddenValue ARE
+// the HMAC key, and the base32 form totpNow needs (and that future logins persist
+// as PJE_2FA_TOTP_SECRET) is base32(hiddenValue bytes). The hidden field is
+// reliably present and unambiguous, so it is preferred and base32-ENCODED here.
+//
+// The visible span already holds the base32 form (totpSecretEncoded); it is used
+// only when the hidden field is absent, and only if it actually decodes as base32
+// -- jus.br has been observed rendering an empty or non-base32 span, which must
+// not be enrolled blindly. When neither candidate yields a usable secret the
+// function fails loudly (naming the sources tried) rather than enrolling a blank
+// or malformed code.
 func chooseTOTPSecret(spanText, hiddenValue string) (string, error) {
-	for _, candidate := range []string{spanText, hiddenValue} {
-		if normalizeBase32Secret(candidate) != "" {
-			return normalizeBase32Secret(candidate), nil
+	if raw := strings.TrimSpace(hiddenValue); raw != "" {
+		return base32.StdEncoding.EncodeToString([]byte(raw)), nil
+	}
+	if span := normalizeBase32Secret(spanText); span != "" {
+		if _, err := base32.StdEncoding.DecodeString(span); err == nil {
+			return span, nil
 		}
 	}
 	return "", fmt.Errorf(
-		"browser: CONFIGURE_TOTP page has no readable secret (tried %s)",
+		"browser: CONFIGURE_TOTP page has no usable secret (tried %s)",
 		strings.Join(totpSecretSelectors, ", "),
 	)
 }
