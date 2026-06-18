@@ -304,6 +304,7 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 	deadline := time.Now().Add(3 * time.Minute)
 	certRetries := 0
 	twoFASubmitted := false
+	totpEnrolled := false
 
 	for time.Now().Before(deadline) {
 		select {
@@ -341,7 +342,21 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 			continue
 		}
 
-		// 3) 2FA prompt? Handle it (or fail loudly if no secret).
+		// 3) CONFIGURE_TOTP required-action? Enroll the authenticator (the
+		// account demands registering a new TOTP, not just typing a code). The
+		// minted secret is logged at INFO for the operator to persist.
+		enrolled, err := b.maybeEnrollTOTP(ctx, cur, &totpEnrolled)
+		if err != nil {
+			return err
+		}
+		if enrolled {
+			if err := sleepCtx(sess.root, enrollTOTPBackoff); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// 4) 2FA prompt? Handle it (or fail loudly if no secret).
 		handled, err := b.maybeHandle2FA(ctx, cur, certClickedAt, &twoFASubmitted)
 		if err != nil {
 			return err
@@ -353,7 +368,7 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 			continue
 		}
 
-		// 4) Certificate link visible again -> retry the click (bounded).
+		// 5) Certificate link visible again -> retry the click (bounded).
 		retried, err := b.maybeRetryCert(ctx, &certRetries, &certClickedAt)
 		if err != nil {
 			return err
