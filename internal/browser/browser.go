@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"time"
 
@@ -69,6 +70,7 @@ type Browser struct {
 	signer signer.Signer
 	cfg    Config
 	log    *slog.Logger
+	debug  bool // when true, chromedp CDP traffic is logged to stderr
 }
 
 // New creates a Browser that signs the certificate handshake with s. The
@@ -87,7 +89,12 @@ func New(s signer.Signer, cfg Config, log *slog.Logger) *Browser {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Browser{signer: s, cfg: cfg, log: log}
+	return &Browser{
+		signer: s,
+		cfg:    cfg,
+		log:    log,
+		debug:  os.Getenv(envChromedpDebug) != "",
+	}
 }
 
 // Login performs the full headless SSO flow and returns the captured bearer
@@ -119,7 +126,7 @@ func (b *Browser) Login(ctx context.Context) (string, error) {
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(ctx, b.allocatorOptions()...)
 	defer cancelAlloc()
 
-	taskCtx, cancelTask := chromedp.NewContext(allocCtx)
+	taskCtx, cancelTask := chromedp.NewContext(allocCtx, b.contextOptions()...)
 	defer cancelTask()
 
 	capture := newBearerCapture()
@@ -134,17 +141,46 @@ func (b *Browser) Login(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("browser: initial login navigation: %w", err)
 	}
 
+	// The certificate click can swap/destroy the initial page target, which
+	// invalidates taskCtx. From here on, drive the flow through a session that
+	// re-binds to the live page target instead of aborting on invalid-context.
+	sess := newSession(taskCtx, taskCtx, capture)
+	defer sess.close()
+
 	// 3) Drive SSO/2FA until we leave the SSO host.
-	if err := b.awaitAuthenticated(taskCtx); err != nil {
+	if err := b.awaitAuthenticated(sess); err != nil {
 		return "", err
 	}
 
 	// 4) Open consultation, fire search, capture bearer.
-	bearer, err := b.captureBearer(taskCtx, capture)
+	bearer, err := b.captureBearer(sess, capture)
 	if err != nil {
 		return "", err
 	}
 	return bearer, nil
+}
+
+// contextOptions returns the chromedp context options. When PJE_CHROMEDP_DEBUG
+// is set, it enables WithDebugf/WithErrorf so the raw CDP protocol traffic
+// (Target.targetCreated/targetDestroyed, navigation, crashes) is written to
+// stderr. This is the instrumentation used to confirm the invalid-context root
+// cause and is otherwise a no-op. It writes to stderr directly (not via the
+// structured logger) so the verbose protocol dump stays out of the normal log
+// stream and is unconditionally visible when debugging.
+func (b *Browser) contextOptions() []chromedp.ContextOption {
+	if !b.debug {
+		return nil
+	}
+	debugf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "[chromedp DEBUG] "+format+"\n", args...)
+	}
+	errorf := func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "[chromedp ERROR] "+format+"\n", args...)
+	}
+	return []chromedp.ContextOption{
+		chromedp.WithDebugf(debugf),
+		chromedp.WithErrorf(errorf),
+	}
 }
 
 // startPJeOffice starts the signing server on the configured loopback address
@@ -196,16 +232,7 @@ func (b *Browser) allocatorOptions() []chromedp.ExecAllocatorOption {
 // correlating them by RequestID. This is the native-CDP replacement for
 // selenium-wire's wait_for_request.
 func (b *Browser) attachNetworkListener(ctx context.Context, capture *bearerCapture) {
-	chromedp.ListenTarget(ctx, func(ev any) {
-		switch e := ev.(type) {
-		case *network.EventRequestWillBeSent:
-			if e.Request != nil {
-				capture.onRequest(string(e.RequestID), e.Request.URL)
-			}
-		case *network.EventRequestWillBeSentExtraInfo:
-			capture.onExtraInfo(string(e.RequestID), map[string]any(e.Headers))
-		}
-	})
+	attachBearerListener(ctx, capture)
 }
 
 // waitAutenticarReady blocks until window.autenticar is a function, matching
@@ -229,9 +256,15 @@ func (b *Browser) waitAutenticarReady() chromedp.Action {
 	})
 }
 
-// clickCertLink clicks the "Entrar com Seu certificado digital" link, whose
-// onclick attribute calls autenticar('<challenge>'). This triggers the page to
-// call the local pjeoffice server for the certificate handshake.
+// clickCertLink triggers the "Entrar com Seu certificado digital" link, whose
+// onclick attribute calls autenticar('<challenge>'). Firing autenticar() is what
+// makes the page POST the certificate handshake to the local pjeoffice server,
+// so the click MUST run the inline onclick handler -- a DOM coordinate click
+// would race with overlays and is not what the proven Python reference does.
+// This is the faithful Go analogue of
+// driver.execute_script("arguments[0].click();", cert_link): a single JS click()
+// on the anchor, which runs onclick="autenticar('<challenge>')" exactly once
+// (firing it twice could double-POST the handshake and break it).
 func (b *Browser) clickCertLink() chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		const js = `(function(){
@@ -253,8 +286,13 @@ func (b *Browser) clickCertLink() chromedp.Action {
 
 // awaitAuthenticated polls the URL until it leaves the SSO host (success), or
 // handles the optional 2FA prompt, gov.br fallback, and certificate retry. It
-// is a faithful port of the monitoring loop in the Python reference.
-func (b *Browser) awaitAuthenticated(ctx context.Context) error {
+// is a faithful port of the monitoring loop in the Python reference, including
+// its resilience: instead of aborting on a dead-context URL read (the observed
+// "invalid context" bug, caused by autenticar() swapping the page target), it
+// re-binds to the live page target via the session and keeps polling until the
+// deadline. This mirrors the Python loop wrapping driver.current_url in
+// try/except plus switch_to_new_tab_if_any.
+func (b *Browser) awaitAuthenticated(sess *session) error {
 	certClickedAt := time.Now()
 	deadline := time.Now().Add(3 * time.Minute)
 	certRetries := 0
@@ -262,18 +300,21 @@ func (b *Browser) awaitAuthenticated(ctx context.Context) error {
 
 	for time.Now().Before(deadline) {
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
+		case <-sess.root.Done():
+			return sess.root.Err()
 		default:
 		}
 
-		cur, err := currentURL(ctx)
+		// Resilient read: re-binds on invalid-context and only errors at the
+		// deadline.
+		cur, err := sess.readURLResilient(deadline, time.Second)
 		if err != nil {
-			return fmt.Errorf("browser: read current URL: %w", err)
+			return err
 		}
+		ctx := sess.active()
 
 		// 1) Success: left the SSO host for jus.br / portaldeservicos.
-		if (strings.Contains(cur, "www.jus.br") && !strings.Contains(cur, "sso.cloud.pje.jus.br")) ||
+		if (strings.Contains(cur, "www.jus.br") && !strings.Contains(cur, ssoHost)) ||
 			strings.Contains(cur, "portaldeservicos.pdpj.jus.br") {
 			return nil
 		}
@@ -282,9 +323,12 @@ func (b *Browser) awaitAuthenticated(ctx context.Context) error {
 		if strings.Contains(cur, "sso.acesso.gov.br") {
 			b.log.Warn("redirected to gov.br; restarting jus.br login")
 			if err := chromedp.Run(ctx, chromedp.Navigate(loginURL)); err != nil {
+				if isInvalidContext(err) {
+					continue // target swapped under us; the loop will rebind
+				}
 				return fmt.Errorf("browser: restart login after gov.br: %w", err)
 			}
-			if err := sleepCtx(ctx, 3*time.Second); err != nil {
+			if err := sleepCtx(sess.root, 3*time.Second); err != nil {
 				return err
 			}
 			continue
@@ -296,7 +340,7 @@ func (b *Browser) awaitAuthenticated(ctx context.Context) error {
 			return err
 		}
 		if handled {
-			if err := sleepCtx(ctx, 5*time.Second); err != nil {
+			if err := sleepCtx(sess.root, 5*time.Second); err != nil {
 				return err
 			}
 			continue
@@ -308,13 +352,13 @@ func (b *Browser) awaitAuthenticated(ctx context.Context) error {
 			return err
 		}
 		if retried {
-			if err := sleepCtx(ctx, 5*time.Second); err != nil {
+			if err := sleepCtx(sess.root, 5*time.Second); err != nil {
 				return err
 			}
 			continue
 		}
 
-		if err := sleepCtx(ctx, 1*time.Second); err != nil {
+		if err := sleepCtx(sess.root, 1*time.Second); err != nil {
 			return err
 		}
 	}
@@ -387,6 +431,11 @@ func (b *Browser) maybeHandle2FA(
 	})(` + jsString(code) + `)`
 	var ok bool
 	if err := chromedp.Evaluate(submitJS, &ok).Do(ctx); err != nil {
+		if isInvalidContext(err) {
+			// Target swapped during submit; let the outer loop rebind and
+			// re-detect rather than failing the whole login.
+			return false, nil
+		}
 		return false, fmt.Errorf("browser: submit 2FA: %w", err)
 	}
 	if !ok {
@@ -428,14 +477,29 @@ func (b *Browser) maybeRetryCert(
 
 // captureBearer navigates to the consultation page, fires a search, and waits
 // for the bearerCapture to receive the Authorization header of the
-// /api/v2/processos/ request.
-func (b *Browser) captureBearer(ctx context.Context, capture *bearerCapture) (string, error) {
+// /api/v2/processos/ request. It runs against the session's active page target
+// and re-binds once if that target was swapped while leaving the SSO flow.
+func (b *Browser) captureBearer(sess *session, capture *bearerCapture) (string, error) {
+	ctx := sess.active()
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(consultaURL),
 		b.waitConsultaForm(),
 		b.fireSearch(),
 	); err != nil {
-		return "", fmt.Errorf("browser: open consulta and search: %w", err)
+		if !isInvalidContext(err) {
+			return "", fmt.Errorf("browser: open consulta and search: %w", err)
+		}
+		// The active target died as we left the SSO flow; rebind and retry once.
+		if _, rebindErr := sess.rebind(); rebindErr != nil {
+			return "", rebindErr
+		}
+		if err := chromedp.Run(sess.active(),
+			chromedp.Navigate(consultaURL),
+			b.waitConsultaForm(),
+			b.fireSearch(),
+		); err != nil {
+			return "", fmt.Errorf("browser: open consulta and search after rebind: %w", err)
+		}
 	}
 
 	deadline := time.Now().Add(60 * time.Second)
@@ -444,7 +508,7 @@ func (b *Browser) captureBearer(ctx context.Context, capture *bearerCapture) (st
 			b.log.Info("bearer token captured")
 			return tok, nil
 		}
-		if err := sleepCtx(ctx, 250*time.Millisecond); err != nil {
+		if err := sleepCtx(sess.root, 250*time.Millisecond); err != nil {
 			return "", err
 		}
 	}

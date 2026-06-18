@@ -9,6 +9,13 @@ const (
 	envPJeOfficePort = "PJE_PJEOFFICE_PORT"
 	envBindAddr      = "PJE_BIND_ADDR"
 	envChromePath    = "PJE_CHROME_PATH"
+
+	// envChromedpDebug, when set to any non-empty value, makes Login wire
+	// chromedp's WithDebugf/WithErrorf so the raw CDP protocol traffic
+	// (Target.targetCreated/targetDestroyed, navigation, crashes) is logged to
+	// stderr. This is the instrumentation used to confirm the invalid-context
+	// root cause; it is off by default to keep normal runs quiet.
+	envChromedpDebug = "PJE_CHROMEDP_DEBUG"
 )
 
 // ConfigFromEnv builds a Config from environment variables. The 2FA secret is
