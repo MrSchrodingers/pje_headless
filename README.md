@@ -59,6 +59,9 @@ O binario tem quatro modos, selecionados por `PJE_MODE`:
   `GetBearer` e `Health`. Reusa a sessao via `LoginManager` (cache do bearer com
   expiracao e coalescencia), disparando o login headless somente quando nao ha
   token fresco em cache.
+- `totp` — imprime no stdout, a cada 1s, o codigo TOTP atual e o tempo restante
+  da janela, a partir de `PJE_2FA_TOTP_SECRET`. Serve para captura MANUAL do 2FA
+  via `docker logs` de um container dedicado; nao requer Chrome nem assina nada.
 
 ### Topologia dual (token num host, browser noutro)
 
@@ -123,7 +126,7 @@ segredo deve ser passado por argumento de linha de comando ou versionado.
 
 | Variavel               | Padrao                       | Descricao                                             |
 |------------------------|------------------------------|-------------------------------------------------------|
-| `PJE_MODE`             | `full`                       | Modo do servico: `full`, `signer-only`, `login` ou `login-service` (ver "Modos de operacao"). |
+| `PJE_MODE`             | `full`                       | Modo do servico: `full`, `signer-only`, `login`, `login-service` ou `totp` (ver "Modos de operacao"). |
 | `PJE_SIGNER_PRIORITY`  | `pkcs11,pfx`                 | Ordem de backends (`pkcs11`, `pfx`, `remote`). Primeiro disponivel e usado. |
 | `PJE_PKCS11_MODULE`    | `/usr/lib/libaetpkss.so`     | Caminho do modulo PKCS#11 do token A3.                |
 | `PJE_PKCS11_PIN`       | (sem padrao)                 | PIN do token A3.                                      |
@@ -227,8 +230,9 @@ automaticamente quando a conta exige TOTP:
 
 O segredo TOTP e uma credencial: trate-o como `.env`/secret de runtime e nunca o
 versione (ver "Seguranca"). Para um login MANUAL no navegador (fora do fluxo
-headless), o codigo atual pode ser derivado do mesmo segredo base32 por qualquer
-gerador TOTP RFC 6238.
+headless), o codigo atual pode ser obtido pelo modo `totp` deste binario
+(`PJE_MODE=totp`, lendo via `docker logs`) ou por qualquer gerador TOTP RFC 6238
+sobre o mesmo segredo base32.
 
 ---
 
@@ -379,7 +383,7 @@ Pendente:
 
 - Deploy do container no host do token, com Chrome para os modos de login e os
   mounts de PKCS#11 / `pcscd`.
-- Migracao do consumidor (vigia) para obter o bearer via `GetBearer` gRPC.
+- Migracao do consumidor para obter o bearer via `GetBearer` gRPC.
 - Hardening com mTLS nos servicos gRPC (`SignerService` e `LoginService`).
 
 ---

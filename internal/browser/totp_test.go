@@ -8,7 +8,7 @@ import (
 // TestTOTPAt verifies the RFC 6238 (SHA1, 6-digit) generator against an
 // independent oracle. The oracle values were computed with the Python stdlib
 // reference (hmac/struct/hashlib), which is the same algorithm proven in
-// production by vigia/services/pje_worker.py::get_totp_token. The t=59 case
+// production by the reference Python implementation. The t=59 case
 // cross-checks the official RFC 6238 Appendix B vector (full value 94287082,
 // truncated to 6 digits -> 287082), so the expectation is anchored to the
 // standard, not to this package's own implementation.

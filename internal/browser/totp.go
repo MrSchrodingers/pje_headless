@@ -15,7 +15,7 @@ const totpStep = 30
 
 // totpAt computes the RFC 6238 TOTP (HMAC-SHA1, 6 digits) for the given base32
 // secret at instant at. It is a faithful port of the algorithm proven in
-// production by vigia/services/pje_worker.py::get_totp_token, with one
+// production by the reference Python implementation, with one
 // deliberate contract change: an invalid or empty secret returns an error
 // instead of silently yielding "". A silent empty code would let the 2FA flow
 // submit a blank OTP and fail opaquely; failing loudly is the documented
@@ -55,6 +55,19 @@ func totpAt(secret string, at time.Time) (string, error) {
 // totpNow computes the current TOTP for secret using the wall clock.
 func totpNow(secret string) (string, error) {
 	return totpAt(secret, time.Now())
+}
+
+// TOTPNow returns the current TOTP code for the base32 secret together with the
+// seconds remaining in its validity window. Exported for the standalone `totp`
+// mode (a ticker that surfaces the code for MANUAL 2FA capture); the headless
+// login modes compute the code internally and do not use this.
+func TOTPNow(secret string) (code string, remaining int, err error) {
+	now := time.Now()
+	code, err = totpAt(secret, now)
+	if err != nil {
+		return "", 0, err
+	}
+	return code, totpStep - int(now.Unix()%totpStep), nil
 }
 
 // normalizeBase32Secret upper-cases the secret, removes all whitespace, and

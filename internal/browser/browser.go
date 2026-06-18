@@ -1,7 +1,7 @@
 // Package browser performs the headless jus.br SSO login via chromedp/CDP and
-// captures the resulting bearer token. It is a faithful Go port of the proven
-// flow in vigia/services/pje_worker.py::_get_bearer_token, with the
-// selenium-wire request interception replaced by the native CDP Network domain
+// captures the resulting bearer token. It is a faithful Go port of a proven
+// Python reference flow, with the selenium-wire request interception replaced
+// by the native CDP Network domain
 // (see capture.go) and the certificate handshake delegated to the local
 // pjeoffice.Server (the page's autenticar() callback POSTs to
 // http://127.0.0.1:8800/pjeOffice/requisicao/, which this server signs via the

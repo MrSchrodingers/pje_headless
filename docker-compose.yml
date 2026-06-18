@@ -26,3 +26,22 @@ services:
     ports:
       - "127.0.0.1:8800:8800"
     restart: unless-stopped
+
+  # Ticker de 2FA (TOTP): imprime o codigo atual no log a cada 1s, para captura
+  # MANUAL via `docker logs -f pjeheadless_totp` (ou --tail 1). Util quando se loga
+  # no navegador; os modos de login geram o codigo sozinhos e nao precisam disto.
+  # Requer PJE_2FA_TOTP_SECRET (env ou --env-file fora do repo). So o codigo de 6
+  # digitos vai ao log, nunca o segredo.
+  totp:
+    build: .
+    image: pjeoffice-headless:2.0
+    container_name: pjeheadless_totp
+    environment:
+      PJE_MODE: "totp"
+      PJE_2FA_TOTP_SECRET: "${PJE_2FA_TOTP_SECRET:-}"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "2"

@@ -28,8 +28,44 @@ func main() {
 		runLogin(cfg, log)
 	case "login-service":
 		runLoginService(cfg, log)
+	case "totp":
+		runTotp(cfg, log)
 	default:
 		runFull(cfg, log)
+	}
+}
+
+// runTotp prints the current jus.br TOTP code and its remaining validity once
+// per second to stdout. It exists so a MANUAL browser login can read the 2FA
+// code from `docker logs` of a dedicated container, without re-running a full
+// login. The headless login modes compute the code themselves and do not use
+// this. The secret comes from PJE_2FA_TOTP_SECRET; only the 6-digit code is
+// printed, never the secret.
+func runTotp(_ config.Config, log *slog.Logger) {
+	secret := os.Getenv("PJE_2FA_TOTP_SECRET")
+	if secret == "" {
+		log.Error("modo totp: PJE_2FA_TOTP_SECRET ausente")
+		os.Exit(1)
+	}
+	if _, _, err := browser.TOTPNow(secret); err != nil {
+		log.Error("modo totp: segredo TOTP invalido", "err", err)
+		os.Exit(1)
+	}
+	fmt.Println("pje_headless totp: codigo a cada 1s (docker logs --tail 1)")
+	last := ""
+	for {
+		code, remaining, err := browser.TOTPNow(secret)
+		if err != nil {
+			log.Error("modo totp: falha ao gerar codigo", "err", err)
+			os.Exit(1)
+		}
+		marker := ""
+		if code != last {
+			marker = "  <- novo"
+		}
+		fmt.Printf("[pje-2fa] codigo=%s expira_em=%2ds%s\n", code, remaining, marker)
+		last = code
+		time.Sleep(time.Second)
 	}
 }
 
