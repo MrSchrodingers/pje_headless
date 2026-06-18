@@ -1,44 +1,63 @@
 services:
+  # Modo PFX (A1) - servidor PJeOffice :8800. Template; ajuste o volume do PFX.
   pjeoffice-headless:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: pjeoffice-headless:2.0
     container_name: pjeoffice-headless
     environment:
-      # Selecione o backend de assinatura: "pfx", "pkcs11" ou "pkcs11,pfx"
       PJE_SIGNER_PRIORITY: "pfx"
-      # Caminho do PFX montado no container (ver volumes abaixo)
       PJE_PFX_PATH: "/run/secrets/cert.pfx"
       # PJE_PFX_PASS: defina via --env-file ou Docker secret; nao coloque aqui
-      # PJE_PKCS11_PIN: idem
-      # Para token A3, adicionar tambem:
-      #   PJE_PKCS11_MODULE: /usr/lib/libaetpkss.so
-      #   PJE_PKCS11_SLOT: "0"
       PJE_PJEOFFICE_PORT: "8800"
       PJE_BIND_ADDR: "0.0.0.0"   # dentro do container; porta mapeada so em loopback abaixo
     volumes:
-      # Monte o certificado PFX em modo somente-leitura.
-      # Substitua o caminho do host pelo caminho real do seu certificado.
-      # Exemplo: - /caminho/do/host/cert.pfx:/run/secrets/cert.pfx:ro
-      - /dev/null:/run/secrets/cert.pfx:ro   # placeholder — substitua antes de usar
-      # Para token A3 (Plano 2), adicionar:
-      #   - /usr/lib/libaetpkss.so:/usr/lib/libaetpkss.so:ro
-      #   - /run/pcscd/pcscd.comm:/run/pcscd/pcscd.comm
+      - /dev/null:/run/secrets/cert.pfx:ro   # placeholder - substitua antes de usar
     ports:
       - "127.0.0.1:8800:8800"
     restart: unless-stopped
+    profiles: ["pfx"]
 
-  # Ticker de 2FA (TOTP): imprime o codigo atual no log a cada 1s, para captura
-  # MANUAL via `docker logs -f pjeheadless_totp` (ou --tail 1). Util quando se loga
-  # no navegador; os modos de login geram o codigo sozinhos e nao precisam disto.
-  # Requer PJE_2FA_TOTP_SECRET (env ou --env-file fora do repo). So o codigo de 6
-  # digitos vai ao log, nunca o segredo.
+  # LoginService gRPC (login headless do jus.br). Requer Chromium -> imagem
+  # runtime-chrome. Delega a assinatura ao SignerService remoto (host do token)
+  # via PJE_SIGNER_REMOTE_ADDR (definido no .env, fora do repo). Publica :9091 no
+  # host para consumidores em outras redes (ex.: o worker). Segredos vem do .env.
+  login-service:
+    build:
+      context: .
+      target: runtime-chrome
+    image: pjeoffice-headless:2.0-login
+    container_name: pjeheadless_login
+    env_file:
+      - .env
+    environment:
+      PJE_MODE: "login-service"
+      PJE_SIGNER_PRIORITY: "remote"
+      PJE_LOGIN_GRPC_ADDR: "0.0.0.0:9091"
+      PJE_PJEOFFICE_PORT: "8800"
+      PJE_BIND_ADDR: "127.0.0.1"
+      PJE_CHROME_PATH: "/usr/bin/chromium"
+    ports:
+      - "9091:9091"
+    healthcheck:
+      disable: true
+    restart: unless-stopped
+
+  # Ticker de 2FA (TOTP): codigo atual no log para captura MANUAL via
+  # `docker logs -f pjeheadless_totp`. Nao precisa de Chromium (imagem slim).
   totp:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: pjeoffice-headless:2.0
     container_name: pjeheadless_totp
+    env_file:
+      - .env
     environment:
       PJE_MODE: "totp"
-      PJE_2FA_TOTP_SECRET: "${PJE_2FA_TOTP_SECRET:-}"
+    healthcheck:
+      disable: true
     restart: unless-stopped
     logging:
       driver: json-file

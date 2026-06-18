@@ -59,3 +59,20 @@ LABEL org.opencontainers.image.title="pjeoffice-headless" \
 
 USER app
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
+
+# ---------------------------------------------------------------------------
+# Stage 3: runtime-chrome
+# Variante com Chromium para os modos de login (login / login-service), que
+# dirigem um browser headless via chromedp. Os modos full / signer-only / totp
+# usam a imagem 'runtime' (slim, sem Chromium). chromedp ja roda com
+# --no-sandbox / --headless=new, adequado a container. Herda ENTRYPOINT/USER
+# do estagio 'runtime'.
+# ---------------------------------------------------------------------------
+FROM runtime AS runtime-chrome
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+ && rm -rf /var/lib/apt/lists/*
+ENV PJE_CHROME_PATH=/usr/bin/chromium
+USER app
