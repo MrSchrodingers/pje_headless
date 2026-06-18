@@ -17,3 +17,6 @@ cj.txt
 # Artefatos de debug e planejamento interno (nao publicar)
 test.sh
 docs/
+
+# Runner de validacao local (contem caminhos do host do token; nao publicar)
+/run-local-login.sh
