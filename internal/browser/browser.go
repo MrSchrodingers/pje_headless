@@ -474,7 +474,7 @@ func (b *Browser) maybeHandle2FA(
 		return !!el;
 	})()`
 	var present bool
-	if err := chromedp.Evaluate(detectJS, &present).Do(ctx); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(detectJS, &present)); err != nil {
 		return false, nil // transient eval error; let the loop retry
 	}
 	if !present {
@@ -496,7 +496,7 @@ func (b *Browser) maybeHandle2FA(
 		return r.width > 0 && r.height > 0;
 	})()`
 	var visible bool
-	_ = chromedp.Evaluate(visibleJS, &visible).Do(ctx)
+	_ = chromedp.Run(ctx, chromedp.Evaluate(visibleJS, &visible))
 
 	idleOnSSO := strings.Contains(cur, "sso.cloud.pje.jus.br") &&
 		time.Since(certClickedAt) > 60*time.Second
@@ -521,7 +521,7 @@ func (b *Browser) maybeHandle2FA(
 		return false;
 	})(` + jsString(code) + `)`
 	var ok bool
-	if err := chromedp.Evaluate(submitJS, &ok).Do(ctx); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(submitJS, &ok)); err != nil {
 		if isInvalidContext(err) {
 			// Target swapped during submit; let the outer loop rebind and
 			// re-detect rather than failing the whole login.
@@ -554,7 +554,7 @@ func (b *Browser) maybeRetryCert(
 		return true;
 	})()`
 	var clicked bool
-	if err := chromedp.Evaluate(js, &clicked).Do(ctx); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &clicked)); err != nil {
 		return false, nil
 	}
 	if !clicked {

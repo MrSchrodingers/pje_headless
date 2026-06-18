@@ -209,7 +209,13 @@ func waitTOTPSecretReady(ctx context.Context) error {
 func waitReadyBounded(ctx context.Context, sel string) error {
 	waitCtx, cancel := context.WithTimeout(ctx, totpSecretWaitTimeout)
 	defer cancel()
-	return chromedp.WaitReady(sel, chromedp.ByQuery).Do(waitCtx)
+	// chromedp.Run injects the page target as the CDP executor into the context
+	// for the duration of the action; calling Action.Do(ctx) directly panics with
+	// a nil cdp.Executor when ctx is a bare session context (the rebound
+	// sess.active() context carries the *chromedp.Context value but no executor
+	// outside a Run). Run is the canonical entry point and matches rebind() and
+	// captureBearer() elsewhere in this package.
+	return chromedp.Run(waitCtx, chromedp.WaitReady(sel, chromedp.ByQuery))
 }
 
 // readTOTPSecretCandidates extracts both secret candidates from the page in one
@@ -228,7 +234,7 @@ func readTOTPSecretCandidates(ctx context.Context) (span, hidden string, err err
 		Span   string `json:"span"`
 		Hidden string `json:"hidden"`
 	}
-	if evalErr := chromedp.Evaluate(js, &out).Do(ctx); evalErr != nil {
+	if evalErr := chromedp.Run(ctx, chromedp.Evaluate(js, &out)); evalErr != nil {
 		return "", "", evalErr
 	}
 	return out.Span, out.Hidden, nil
@@ -260,7 +266,7 @@ func submitTOTPEnrollment(ctx context.Context, code string) (bool, error) {
 		return false;
 	})(` + jsString(code) + `, ` + jsString(totpDeviceLabel) + `)`
 	var ok bool
-	if err := chromedp.Evaluate(js, &ok).Do(ctx); err != nil {
+	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &ok)); err != nil {
 		return false, err
 	}
 	return ok, nil
