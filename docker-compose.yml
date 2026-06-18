@@ -19,6 +19,28 @@ services:
     restart: unless-stopped
     profiles: ["pfx"]
 
+  # Modo full - servidor PJeOffice :8800 publicado no host (loopback), assinando
+  # via o SignerService remoto (token). Atende o LOGIN MANUAL no navegador: a
+  # pagina do jus.br chama http://localhost:8800 e este servico assina pelo token.
+  # (O navegador ainda precisa das flags de PNA p/ alcancar o loopback a partir de
+  # uma pagina HTTPS.) Config/endereco do signer vem do .env.
+  pjeoffice:
+    build:
+      context: .
+      target: runtime
+    image: pjeoffice-headless:2.0
+    container_name: pjeheadless_pjeoffice
+    env_file:
+      - .env
+    environment:
+      PJE_MODE: "full"
+      PJE_SIGNER_PRIORITY: "remote"
+      PJE_PJEOFFICE_PORT: "8800"
+      PJE_BIND_ADDR: "0.0.0.0"
+    ports:
+      - "127.0.0.1:8800:8800"
+    restart: unless-stopped
+
   # LoginService gRPC (login headless do jus.br). Requer Chromium -> imagem
   # runtime-chrome. Delega a assinatura ao SignerService remoto (host do token)
   # via PJE_SIGNER_REMOTE_ADDR (definido no .env, fora do repo). Publica :9091 no
