@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 
@@ -79,84 +80,12 @@ func NewPKCS11Signer(module, pin, slotHint, label, chainDir string) *PKCS11Signe
 // and CertChainPKIPath.
 //
 // Login is idempotent: if a session is already open it is torn down and re-opened.
-func (s *PKCS11Signer) Login(_ context.Context) error {
+func (s *PKCS11Signer) Login(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.teardown()
-
-	ctx := p11.New(s.module)
-	if ctx == nil {
-		return fmt.Errorf("pkcs11 login: cannot load module %q", s.module)
-	}
-
-	if err := ctx.Initialize(); err != nil {
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: Initialize: %w", err)
-	}
-
-	slotID, err := findSlot(ctx, s.label, s.slotHint)
-	if err != nil {
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: %w", err)
-	}
-
-	sh, err := ctx.OpenSession(slotID, p11.CKF_SERIAL_SESSION|p11.CKF_RW_SESSION)
-	if err != nil {
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: OpenSession slot %d: %w", slotID, err)
-	}
-
-	if err := ctx.Login(sh, p11.CKU_USER, s.pin); err != nil {
-		if !alreadyLoggedIn(err) {
-			_ = ctx.CloseSession(sh)
-			_ = ctx.Finalize()
-			ctx.Destroy()
-			return fmt.Errorf("pkcs11 login: C_Login: %w", err)
-		}
-		// token already authenticated on this module — treat as success
-	}
-
-	privKey, err := findObject(ctx, sh, p11.CKO_PRIVATE_KEY)
-	if err != nil {
-		_ = ctx.CloseSession(sh)
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: find private key: %w", err)
-	}
-
-	certHandle, err := findObject(ctx, sh, p11.CKO_CERTIFICATE)
-	if err != nil {
-		_ = ctx.CloseSession(sh)
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: find certificate: %w", err)
-	}
-
-	attrs, err := ctx.GetAttributeValue(sh, certHandle, []*p11.Attribute{
-		p11.NewAttribute(p11.CKA_VALUE, nil),
-	})
-	if err != nil {
-		_ = ctx.CloseSession(sh)
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return fmt.Errorf("pkcs11 login: GetAttributeValue(CKA_VALUE): %w", err)
-	}
-	if len(attrs) == 0 || len(attrs[0].Value) == 0 {
-		_ = ctx.CloseSession(sh)
-		_ = ctx.Finalize()
-		ctx.Destroy()
-		return errors.New("pkcs11 login: certificate DER is empty")
-	}
-
-	// Commit state only after all operations succeed.
-	s.p = ctx
-	s.sh = sh
-	s.privKey = privKey
-	s.leafDER = attrs[0].Value
-	return nil
+	return s.loginLocked(ctx)
 }
 
 // teardown closes the open session and finalises the module. Must be called with mu held.
@@ -203,17 +132,104 @@ func (s *PKCS11Signer) Sign(_ context.Context, phrase, algorithm string) (string
 		return "", errors.New("pkcs11 sign: not logged in")
 	}
 
-	mech := []*p11.Mechanism{p11.NewMechanism(mechID, nil)}
-	if err := s.p.SignInit(s.sh, mech, s.privKey); err != nil {
-		return "", fmt.Errorf("pkcs11 sign: SignInit: %w", err)
+	sig, err := s.doSign(mechID, data)
+	if err != nil && isRetryablePKCS11Err(err) {
+		log.Printf("pkcs11: sessao degradada (codigo: %v), refazendo login e retentando sign", err)
+		s.teardown()
+		if loginErr := s.loginLocked(context.Background()); loginErr != nil {
+			return "", fmt.Errorf("pkcs11 sign: sessao-retry login falhou: %w (erro original: %v)", loginErr, err)
+		}
+		sig, err = s.doSign(mechID, data)
 	}
-
-	sig, err := s.p.Sign(s.sh, data)
 	if err != nil {
-		return "", fmt.Errorf("pkcs11 sign: Sign: %w", err)
+		return "", fmt.Errorf("pkcs11 sign: %w", err)
 	}
 
 	return base64.StdEncoding.EncodeToString(sig), nil
+}
+
+// doSign executa SignInit + Sign na sessao atual. Deve ser chamado com mu held.
+func (s *PKCS11Signer) doSign(mechID uint, data []byte) ([]byte, error) {
+	mech := []*p11.Mechanism{p11.NewMechanism(mechID, nil)}
+	if err := s.p.SignInit(s.sh, mech, s.privKey); err != nil {
+		return nil, err
+	}
+	return s.p.Sign(s.sh, data)
+}
+
+// loginLocked executa a sequencia completa de Initialize/OpenSession/Login/findObject
+// sem adquirir mu (deve ser chamado com mu ja held).
+func (s *PKCS11Signer) loginLocked(_ context.Context) error {
+	ctx := p11.New(s.module)
+	if ctx == nil {
+		return fmt.Errorf("pkcs11 login: cannot load module %q", s.module)
+	}
+
+	if err := ctx.Initialize(); err != nil {
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: Initialize: %w", err)
+	}
+
+	slotID, err := findSlot(ctx, s.label, s.slotHint)
+	if err != nil {
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: %w", err)
+	}
+
+	sh, err := ctx.OpenSession(slotID, p11.CKF_SERIAL_SESSION|p11.CKF_RW_SESSION)
+	if err != nil {
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: OpenSession slot %d: %w", slotID, err)
+	}
+
+	if err := ctx.Login(sh, p11.CKU_USER, s.pin); err != nil {
+		if !alreadyLoggedIn(err) {
+			_ = ctx.CloseSession(sh)
+			_ = ctx.Finalize()
+			ctx.Destroy()
+			return fmt.Errorf("pkcs11 login: C_Login: %w", err)
+		}
+	}
+
+	privKey, err := findObject(ctx, sh, p11.CKO_PRIVATE_KEY)
+	if err != nil {
+		_ = ctx.CloseSession(sh)
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: find private key: %w", err)
+	}
+
+	certHandle, err := findObject(ctx, sh, p11.CKO_CERTIFICATE)
+	if err != nil {
+		_ = ctx.CloseSession(sh)
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: find certificate: %w", err)
+	}
+
+	attrs, err := ctx.GetAttributeValue(sh, certHandle, []*p11.Attribute{
+		p11.NewAttribute(p11.CKA_VALUE, nil),
+	})
+	if err != nil {
+		_ = ctx.CloseSession(sh)
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return fmt.Errorf("pkcs11 login: GetAttributeValue(CKA_VALUE): %w", err)
+	}
+	if len(attrs) == 0 || len(attrs[0].Value) == 0 {
+		_ = ctx.CloseSession(sh)
+		_ = ctx.Finalize()
+		ctx.Destroy()
+		return errors.New("pkcs11 login: certificate DER is empty")
+	}
+
+	s.p = ctx
+	s.sh = sh
+	s.privKey = privKey
+	s.leafDER = attrs[0].Value
+	return nil
 }
 
 // CertChainPKIPath returns the ASN.1 PKIPath (SEQUENCE OF Certificate, RFC 3820)
@@ -370,6 +386,42 @@ func findSlot(ctx *p11.Ctx, label, slotHint string) (uint, error) {
 func alreadyLoggedIn(err error) bool {
 	e, ok := err.(p11.Error)
 	return ok && e == p11.CKR_USER_ALREADY_LOGGED_IN
+}
+
+// isRetryablePKCS11Err reports whether err indicates a transient session or
+// device degradation that may be resolved by tearing down and re-establishing
+// the PKCS#11 session. Only errors that represent recoverable hardware/session
+// state are considered retryable; permanent failures (wrong PIN, bad arguments,
+// etc.) are not.
+//
+// Retryable codes:
+//
+//	CKR_DEVICE_ERROR         (0x30)  -- generic hardware error
+//	CKR_SESSION_HANDLE_INVALID (0xB3) -- stale session handle
+//	CKR_SESSION_CLOSED       (0xB0)  -- session was closed by the token
+//	CKR_USER_NOT_LOGGED_IN   (0x101) -- authentication state lost
+//	CKR_DEVICE_REMOVED       (0x32)  -- token physically reinserted
+//	CKR_TOKEN_NOT_PRESENT    (0xE0)  -- token absent (temporary removal)
+//	CKR_GENERAL_ERROR        (0x05)  -- unspecified recoverable error
+func isRetryablePKCS11Err(err error) bool {
+	if err == nil {
+		return false
+	}
+	var e p11.Error
+	if !errors.As(err, &e) {
+		return false
+	}
+	switch e {
+	case p11.CKR_DEVICE_ERROR,
+		p11.CKR_SESSION_HANDLE_INVALID,
+		p11.CKR_SESSION_CLOSED,
+		p11.CKR_USER_NOT_LOGGED_IN,
+		p11.CKR_DEVICE_REMOVED,
+		p11.CKR_TOKEN_NOT_PRESENT,
+		p11.CKR_GENERAL_ERROR:
+		return true
+	}
+	return false
 }
 
 // findObject locates the first PKCS#11 object of the given class

@@ -121,6 +121,54 @@ func TestMD5DigestInfoEdgeCases(t *testing.T) {
 	}
 }
 
+// TestIsRetryablePKCS11Err verifies the classification of PKCS#11 errors as
+// retryable (session/device degradation) or non-retryable (permanent / caller error).
+//
+// Observable behaviour under test:
+//   - Each of the seven retryable codes (device/session degradation) returns true.
+//   - CKR_PIN_INCORRECT (permanent auth failure) returns false.
+//   - A plain non-pkcs11 error returns false.
+//   - nil returns false.
+func TestIsRetryablePKCS11Err(t *testing.T) {
+	retryable := []struct {
+		name string
+		err  error
+	}{
+		{"CKR_DEVICE_ERROR", p11.Error(p11.CKR_DEVICE_ERROR)},
+		{"CKR_SESSION_HANDLE_INVALID", p11.Error(p11.CKR_SESSION_HANDLE_INVALID)},
+		{"CKR_SESSION_CLOSED", p11.Error(p11.CKR_SESSION_CLOSED)},
+		{"CKR_USER_NOT_LOGGED_IN", p11.Error(p11.CKR_USER_NOT_LOGGED_IN)},
+		{"CKR_DEVICE_REMOVED", p11.Error(p11.CKR_DEVICE_REMOVED)},
+		{"CKR_TOKEN_NOT_PRESENT", p11.Error(p11.CKR_TOKEN_NOT_PRESENT)},
+		{"CKR_GENERAL_ERROR", p11.Error(p11.CKR_GENERAL_ERROR)},
+	}
+	for _, tc := range retryable {
+		tc := tc
+		t.Run("retryable/"+tc.name, func(t *testing.T) {
+			if !isRetryablePKCS11Err(tc.err) {
+				t.Errorf("isRetryablePKCS11Err(%v) = false; want true", tc.err)
+			}
+		})
+	}
+
+	nonRetryable := []struct {
+		name string
+		err  error
+	}{
+		{"CKR_PIN_INCORRECT", p11.Error(p11.CKR_PIN_INCORRECT)},
+		{"non-pkcs11 error", errors.New("some other error")},
+		{"nil", nil},
+	}
+	for _, tc := range nonRetryable {
+		tc := tc
+		t.Run("non-retryable/"+tc.name, func(t *testing.T) {
+			if isRetryablePKCS11Err(tc.err) {
+				t.Errorf("isRetryablePKCS11Err(%v) = true; want false", tc.err)
+			}
+		})
+	}
+}
+
 // TestAlreadyLoggedIn verifies the observable behaviour of alreadyLoggedIn:
 // the function must classify CKR_USER_ALREADY_LOGGED_IN as "already logged in"
 // (return true) and must NOT classify any other error code or non-pkcs11 error
