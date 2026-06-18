@@ -33,6 +33,28 @@ func TestBearerCaptureMatchesAPIRequest(t *testing.T) {
 	}
 }
 
+// TestBearerCaptureMatchesLiveQueryFormURL pins the exact URL the live PDPJ
+// consulta fires: GET /api/v2/processos?numeroProcesso=<n>, where the process
+// number is a query parameter and the path has NO trailing slash. The earlier
+// matcher required "/api/v2/processos/" (trailing slash) and silently missed
+// this real, authenticated (HTTP 200) request, so the bearer was never captured.
+// This test fails if the trailing slash is reintroduced.
+func TestBearerCaptureMatchesLiveQueryFormURL(t *testing.T) {
+	c := newBearerCapture()
+
+	const liveURL = "https://portaldeservicos.pdpj.jus.br/api/v2/processos?numeroProcesso=07108025520188020001"
+	c.onRequest("req-live", liveURL)
+	c.onExtraInfo("req-live", map[string]any{"authorization": "bearer eyJlive.tok.999"})
+
+	got, ok := c.bearer()
+	if !ok {
+		t.Fatalf("expected a captured bearer for the live query-form URL %q, got none", liveURL)
+	}
+	if got != "bearer eyJlive.tok.999" {
+		t.Fatalf("captured %q, want %q (full value verbatim, including the scheme prefix)", got, "bearer eyJlive.tok.999")
+	}
+}
+
 // TestBearerCaptureExtraInfoBeforeRequest verifies the events can arrive in any
 // order: ExtraInfo may be delivered before the matching requestWillBeSent.
 func TestBearerCaptureExtraInfoBeforeRequest(t *testing.T) {

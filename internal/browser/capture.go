@@ -6,10 +6,14 @@ import (
 )
 
 // apiURLSubstring is the marker that identifies the target API call whose
-// Authorization header carries the bearer token. It mirrors the
-// driver.wait_for_request(r".*/api/v2/processos/.*") pattern in
-// vigia/services/pje_worker.py.
-const apiURLSubstring = "/api/v2/processos/"
+// Authorization header carries the bearer token. The live PDPJ consulta fires
+// GET /api/v2/processos?numeroProcesso=... (the process number is a QUERY
+// parameter, so the path ends at "processos" with no trailing slash). The
+// trailing slash the Python reference used in its primary regex
+// (.*/api/v2/processos/.*) never matched this URL -- only its broad fallback
+// (.*/api/v2/.*processo.*) did. Matching the slashless prefix subsumes both the
+// query form (/api/v2/processos?...) and any path form (/api/v2/processos/{id}).
+const apiURLSubstring = "/api/v2/processos"
 
 // bearerCapture correlates CDP Network events to extract the bearer token from
 // the first request whose URL matches the target API, replacing selenium-wire.
