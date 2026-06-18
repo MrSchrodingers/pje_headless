@@ -6,8 +6,9 @@ fluxo PJeOffice, assina com o certificado configurado e envia a resposta ao
 tribunal.
 
 Implementa o protocolo de forma independente, com base na codebase do PJeOffice
-Pro (CNJ) e na observacao do protocolo. Projeto nao-oficial, sem vinculo com o
-CNJ.
+Pro (CNJ) e na observacao do protocolo: a aplicacao Java oficial foi descompilada
+com o Luyten (https://github.com/deathmarine/Luyten) para estudo do fluxo.
+Projeto nao-oficial, sem vinculo com o CNJ.
 
 ---
 
