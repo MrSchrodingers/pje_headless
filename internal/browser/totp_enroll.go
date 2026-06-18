@@ -166,3 +166,14 @@ func submitTOTPEnrollment(ctx context.Context, code string) (bool, error) {
 // enrollTOTPBackoff is the pause after submitting enrollment before the polling
 // loop re-reads the URL, giving the SSO time to process the form and redirect.
 const enrollTOTPBackoff = 5 * time.Second
+
+// enrollRetryWindow bounds enrollTOTPRobust: once a CONFIGURE_TOTP URL is
+// observed, the enroll Actions (read the minted secret, type the code, submit)
+// are retried against a fresh live target on transient invalid-context until
+// this sub-deadline. If the secret/form never becomes readable in this window,
+// the login fails loudly rather than spinning until the outer 3-minute timeout.
+const enrollRetryWindow = 30 * time.Second
+
+// enrollRetryBackoff is the pause between enroll attempts inside the retry
+// window, giving a swapped target time to settle before the next read.
+const enrollRetryBackoff = 1 * time.Second

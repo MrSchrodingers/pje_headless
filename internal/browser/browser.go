@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 
 	"github.com/MrSchrodingers/pje_headless/internal/pjeoffice"
@@ -132,20 +133,24 @@ func (b *Browser) Login(ctx context.Context) (string, error) {
 	capture := newBearerCapture()
 	b.attachNetworkListener(taskCtx, capture)
 
+	// The certificate click can swap/destroy the initial page target, which
+	// invalidates taskCtx. From here on, drive the flow through a session that
+	// re-binds to the live page target instead of aborting on invalid-context.
+	// The session is created before the initial Run so its passive URL tracker
+	// (fed by page.EventFrameNavigated) is listening from the first navigation.
+	sess := newSession(taskCtx, taskCtx, capture)
+	defer sess.close()
+	attachFrameListener(taskCtx, sess)
+
 	if err := chromedp.Run(taskCtx,
 		network.Enable(),
+		page.Enable(),
 		chromedp.Navigate(loginURL),
 		b.waitAutenticarReady(),
 		b.clickCertLink(),
 	); err != nil {
 		return "", fmt.Errorf("browser: initial login navigation: %w", err)
 	}
-
-	// The certificate click can swap/destroy the initial page target, which
-	// invalidates taskCtx. From here on, drive the flow through a session that
-	// re-binds to the live page target instead of aborting on invalid-context.
-	sess := newSession(taskCtx, taskCtx, capture)
-	defer sess.close()
 
 	// 3) Drive SSO/2FA until we leave the SSO host.
 	if err := b.awaitAuthenticated(sess); err != nil {
@@ -291,20 +296,25 @@ func (b *Browser) clickCertLink() chromedp.Action {
 	})
 }
 
-// awaitAuthenticated polls the URL until it leaves the SSO host (success), or
-// handles the optional 2FA prompt, gov.br fallback, and certificate retry. It
-// is a faithful port of the monitoring loop in the Python reference, including
-// its resilience: instead of aborting on a dead-context URL read (the observed
-// "invalid context" bug, caused by autenticar() swapping the page target), it
-// re-binds to the live page target via the session and keeps polling until the
-// deadline. This mirrors the Python loop wrapping driver.current_url in
-// try/except plus switch_to_new_tab_if_any.
+// awaitAuthenticated polls the PASSIVELY tracked main-frame URL until it leaves
+// the SSO host (success), or handles the CONFIGURE_TOTP enrollment, optional 2FA
+// prompt, gov.br fallback, and certificate retry. The URL is read from
+// sess.url() (fed by page.EventFrameNavigated) rather than an active
+// chromedp.Location call: that active read was the observed "invalid context"
+// failure, caused by autenticar() swapping the page target mid-redirect. When
+// the active page context dies, the loop rebinds the session so the event
+// listener re-attaches to a live target and the tracker keeps advancing until the
+// deadline. Every observed URL change and phase transition is logged at INFO so a
+// live run is never silent about where it stalls.
 func (b *Browser) awaitAuthenticated(sess *session) error {
 	certClickedAt := time.Now()
 	deadline := time.Now().Add(3 * time.Minute)
 	certRetries := 0
 	twoFASubmitted := false
 	totpEnrolled := false
+	lastLoggedURL := ""
+
+	b.log.Info("awaiting SSO authentication", "timeout", time.Until(deadline).String())
 
 	for time.Now().Before(deadline) {
 		select {
@@ -313,22 +323,34 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 		default:
 		}
 
-		// Resilient read: re-binds on invalid-context and only errors at the
-		// deadline.
-		cur, err := sess.readURLResilient(deadline, time.Second)
-		if err != nil {
-			return err
+		// Passive read: the URL comes from page.EventFrameNavigated of the main
+		// frame (tracked under mutex), so there is no active chromedp.Location
+		// read that can fail with "invalid context" during the redirect chain.
+		// When the active page target dies, rebind so the listener re-attaches to
+		// a live target and keeps feeding the tracker.
+		if sess.active().Err() != nil {
+			if _, rebindErr := sess.rebind(); rebindErr != nil {
+				return rebindErr
+			}
 		}
+		cur := sess.url()
 		ctx := sess.active()
 
+		// Log every observed URL change at INFO so the next live run is not blind
+		// to where the flow stalls.
+		if cur != "" && cur != lastLoggedURL {
+			b.log.Info("SSO url", "url", cur)
+			lastLoggedURL = cur
+		}
+
 		// 1) Success: left the SSO host for jus.br / portaldeservicos.
-		if (strings.Contains(cur, "www.jus.br") && !strings.Contains(cur, ssoHost)) ||
-			strings.Contains(cur, "portaldeservicos.pdpj.jus.br") {
+		if isAuthenticatedURL(cur) {
+			b.log.Info("left SSO host; authentication complete", "url", cur)
 			return nil
 		}
 
 		// 2) Bounced to gov.br -> PJeOffice flow failed; restart login.
-		if strings.Contains(cur, "sso.acesso.gov.br") {
+		if isGovBrURL(cur) {
 			b.log.Warn("redirected to gov.br; restarting jus.br login")
 			if err := chromedp.Run(ctx, chromedp.Navigate(loginURL)); err != nil {
 				if isInvalidContext(err) {
@@ -344,16 +366,21 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 
 		// 3) CONFIGURE_TOTP required-action? Enroll the authenticator (the
 		// account demands registering a new TOTP, not just typing a code). The
-		// minted secret is logged at INFO for the operator to persist.
-		enrolled, err := b.maybeEnrollTOTP(ctx, cur, &totpEnrolled)
-		if err != nil {
-			return err
-		}
-		if enrolled {
-			if err := sleepCtx(sess.root, enrollTOTPBackoff); err != nil {
+		// minted secret is logged at INFO for the operator to persist. The enroll
+		// retries on transient invalid-context against a fresh live target.
+		if shouldAttemptTOTPEnroll(cur, totpEnrolled) {
+			b.log.Info("detected CONFIGURE_TOTP required-action", "url", cur)
+			enrolled, err := b.enrollTOTPRobust(sess, cur, &totpEnrolled)
+			if err != nil {
 				return err
 			}
-			continue
+			if enrolled {
+				b.log.Info("CONFIGURE_TOTP enrollment submitted")
+				if err := sleepCtx(sess.root, enrollTOTPBackoff); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 
 		// 4) 2FA prompt? Handle it (or fail loudly if no secret).
@@ -385,6 +412,43 @@ func (b *Browser) awaitAuthenticated(sess *session) error {
 		}
 	}
 	return errors.New("browser: timed out waiting for SSO redirect / 2FA completion")
+}
+
+// enrollTOTPRobust drives maybeEnrollTOTP against the session's active page
+// target, re-trying on a transient invalid-context error by rebinding to a fresh
+// live target until a short sub-deadline. maybeEnrollTOTP already swallows
+// invalid-context internally (returning enrolled=false, err=nil); this wrapper
+// adds the rebind-and-retry so a target swap mid-enroll does not silently leave
+// the form unfilled. A real failure (secret not found, form not submittable)
+// propagates immediately.
+func (b *Browser) enrollTOTPRobust(sess *session, cur string, enrolled *bool) (bool, error) {
+	subDeadline := time.Now().Add(enrollRetryWindow)
+	attempt := 0
+	for time.Now().Before(subDeadline) {
+		attempt++
+		ok, err := b.maybeEnrollTOTP(sess.active(), cur, enrolled)
+		if err != nil {
+			return false, err
+		}
+		if ok {
+			return true, nil
+		}
+		// Not enrolled and no hard error: either not a CONFIGURE_TOTP page (the
+		// caller already checked, so this is a transient invalid-context the
+		// enroll swallowed) or the secret/form was not ready yet. Rebind to a
+		// live target and retry.
+		b.log.Info("CONFIGURE_TOTP enroll attempt did not submit; retrying", "attempt", attempt)
+		if _, rebindErr := sess.rebind(); rebindErr != nil {
+			return false, rebindErr
+		}
+		if err := sleepCtx(sess.root, enrollRetryBackoff); err != nil {
+			return false, err
+		}
+	}
+	return false, fmt.Errorf(
+		"browser: CONFIGURE_TOTP detected but enrollment did not complete within %s (secret/form never became readable)",
+		enrollRetryWindow,
+	)
 }
 
 // maybeHandle2FA detects the 2FA input (txtAcessoCodigo or otp) and, when
@@ -502,6 +566,7 @@ func (b *Browser) maybeRetryCert(
 // /api/v2/processos/ request. It runs against the session's active page target
 // and re-binds once if that target was swapped while leaving the SSO flow.
 func (b *Browser) captureBearer(sess *session, capture *bearerCapture) (string, error) {
+	b.log.Info("opening consulta to capture bearer", "url", consultaURL)
 	ctx := sess.active()
 	if err := chromedp.Run(ctx,
 		chromedp.Navigate(consultaURL),
@@ -581,15 +646,6 @@ func (b *Browser) fireSearch() chromedp.Action {
 		}
 		return nil
 	})
-}
-
-// currentURL reads document.location.href.
-func currentURL(ctx context.Context) (string, error) {
-	var url string
-	if err := chromedp.Evaluate("document.location.href", &url).Do(ctx); err != nil {
-		return "", err
-	}
-	return url, nil
 }
 
 // sleepCtx sleeps for d, returning early with ctx.Err() if the context is done.

@@ -5,9 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
+	"sync"
 
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
@@ -102,11 +103,13 @@ func isInvalidContext(err error) bool {
 }
 
 // session owns the currently active chromedp page context and knows how to
-// re-bind to a fresh page target when the active one dies. It is the Go
-// equivalent of the Python reference's switch_to_new_tab_if_any plus the
-// resilient try/except loop around driver.current_url: instead of aborting on
-// the first dead-context read, it re-acquires the live page target and keeps
-// going until the deadline.
+// re-bind to a fresh page target when the active one dies (the Go equivalent of
+// the Python reference's switch_to_new_tab_if_any). It also tracks the current
+// main-frame URL PASSIVELY: a page.EventFrameNavigated listener feeds
+// onFrameNavigated, and the polling loop consults url() instead of issuing an
+// active chromedp.Location read. That active read was the source of the observed
+// "invalid context" failure during the SSO redirect chain; replacing it with the
+// event stream removes that failure point entirely.
 //
 // The browser context (allocator + Browser) is shared across all page contexts
 // derived from root, so chromedp.Targets and a re-bound context keep working
@@ -117,6 +120,49 @@ type session struct {
 	cancel  context.CancelFunc
 	capture *bearerCapture
 	boundID target.ID
+
+	// urlMu guards lastURL, which is written by the CDP event goroutine
+	// (onFrameNavigated, fed by the page.EventFrameNavigated listener) and read
+	// by the polling loop (url()). This passive tracking replaces the active
+	// chromedp.Location read that failed with "invalid context" during the SSO
+	// redirect chain.
+	urlMu   sync.Mutex
+	lastURL string
+}
+
+// onFrameNavigated records the URL of a MAIN-frame navigation, ignoring
+// sub-frames and blank URLs (see mainFrameURLFromEvent). It is called from the
+// CDP event goroutine via the page.EventFrameNavigated listener and is safe for
+// concurrent use with url().
+func (s *session) onFrameNavigated(ev *page.EventFrameNavigated) {
+	u, ok := mainFrameURLFromEvent(ev)
+	if !ok {
+		return
+	}
+	s.urlMu.Lock()
+	s.lastURL = u
+	s.urlMu.Unlock()
+}
+
+// url returns the last observed main-frame URL, or "" if no main-frame
+// navigation has been observed yet. The polling loop consults this passively
+// instead of issuing an active chromedp.Location read.
+func (s *session) url() string {
+	s.urlMu.Lock()
+	defer s.urlMu.Unlock()
+	return s.lastURL
+}
+
+// attachFrameListener wires the page.EventFrameNavigated stream on ctx into the
+// session's passive URL tracker, so the tracked URL survives target swaps the
+// same way bearer capture does. The Page domain must be enabled on ctx for these
+// events to fire (see page.Enable() in Login and rebind).
+func attachFrameListener(ctx context.Context, s *session) {
+	chromedp.ListenTarget(ctx, func(ev any) {
+		if e, ok := ev.(*page.EventFrameNavigated); ok {
+			s.onFrameNavigated(e)
+		}
+	})
 }
 
 // newSession adopts the initial page context (already created and run) as the
@@ -153,8 +199,10 @@ func (s *session) rebind() (rebound bool, err error) {
 
 	newCtx, newCancel := chromedp.NewContext(s.root, chromedp.WithTargetID(id))
 	// Force attachment to the chosen target before we adopt it, so a stale
-	// pick fails here instead of later inside the polling loop.
-	if runErr := chromedp.Run(newCtx, network.Enable()); runErr != nil {
+	// pick fails here instead of later inside the polling loop. The Page domain
+	// is enabled so page.EventFrameNavigated keeps feeding the passive URL
+	// tracker on the re-bound target.
+	if runErr := chromedp.Run(newCtx, network.Enable(), page.Enable()); runErr != nil {
 		newCancel()
 		if isInvalidContext(runErr) {
 			return false, nil // the picked target died meanwhile; retry
@@ -165,6 +213,7 @@ func (s *session) rebind() (rebound bool, err error) {
 	if s.capture != nil {
 		attachBearerListener(newCtx, s.capture)
 	}
+	attachFrameListener(newCtx, s)
 
 	if s.cancel != nil {
 		s.cancel()
@@ -181,51 +230,5 @@ func (s *session) close() {
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
-	}
-}
-
-// readURLResilient reads the active context's URL, transparently re-binding to a
-// fresh page target on an invalid-context error and retrying until the deadline.
-// It returns the URL, or an error only when the deadline is exceeded or the
-// context is cancelled. This is the Go analogue of the Python loop that wraps
-// driver.current_url in try/except and continues on failure.
-func (s *session) readURLResilient(deadline time.Time, backoff time.Duration) (string, error) {
-	for {
-		select {
-		case <-s.ctx.Done():
-			// The active page context is done; try to rebind to a live target
-			// before honoring cancellation, unless the root is also done.
-			if rootErr := s.root.Err(); rootErr != nil {
-				return "", rootErr
-			}
-		default:
-		}
-
-		url, err := currentURL(s.ctx)
-		if err == nil {
-			return url, nil
-		}
-		if !isInvalidContext(err) && s.ctx.Err() == nil {
-			// A transient eval error on a live context (e.g. mid-navigation);
-			// treat it like the reference's broad except and retry.
-			if time.Now().After(deadline) {
-				return "", fmt.Errorf("browser: read current URL: %w", err)
-			}
-			if waitErr := sleepCtx(s.root, backoff); waitErr != nil {
-				return "", waitErr
-			}
-			continue
-		}
-
-		// invalid context (or the active context is done): re-acquire a target.
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("browser: read current URL after rebind attempts: %w", err)
-		}
-		if _, rebindErr := s.rebind(); rebindErr != nil {
-			return "", rebindErr
-		}
-		if waitErr := sleepCtx(s.root, backoff); waitErr != nil {
-			return "", waitErr
-		}
 	}
 }
