@@ -10,7 +10,9 @@ import (
 	"github.com/MrSchrodingers/pje_headless/internal/audit"
 	"github.com/MrSchrodingers/pje_headless/internal/browser"
 	"github.com/MrSchrodingers/pje_headless/internal/config"
+	"github.com/MrSchrodingers/pje_headless/internal/grpclogin"
 	"github.com/MrSchrodingers/pje_headless/internal/grpcsigner"
+	"github.com/MrSchrodingers/pje_headless/internal/loginsvc"
 	"github.com/MrSchrodingers/pje_headless/internal/pjeoffice"
 	"github.com/MrSchrodingers/pje_headless/internal/signer"
 )
@@ -24,6 +26,8 @@ func main() {
 		runSignerOnly(cfg, log)
 	case "login":
 		runLogin(cfg, log)
+	case "login-service":
+		runLoginService(cfg, log)
 	default:
 		runFull(cfg, log)
 	}
@@ -118,6 +122,42 @@ func buildOrderedSigners(cfg config.Config, log *slog.Logger) []signer.Signer {
 		}
 	}
 	return signers
+}
+
+// runLoginService starts the LoginService gRPC server (default :9091).
+// It builds the dual signer via buildSigner, wraps the headless browser login
+// in a loginFn, creates a LoginManager for session reuse, and serves on
+// cfg.LoginGRPCAddr.
+//
+// SECURITY: plain TCP by default. Bind only to loopback or a trusted LAN
+// interface via PJE_LOGIN_GRPC_ADDR. The bearer is a credential; do not
+// expose this port on an untrusted network without TLS.
+func runLoginService(cfg config.Config, log *slog.Logger) {
+	s := buildSigner(cfg, log)
+	bcfg := browser.ConfigFromEnv()
+
+	loginFn := func(ctx context.Context) (string, error) {
+		// Bound the expensive headless login independently of the caller's ctx:
+		// a gRPC client without a deadline must not be able to pin the browser
+		// login (and, via the manager's coalescing, every waiter attached to it)
+		// indefinitely. Mirrors runLogin's explicit timeout.
+		timeout := bcfg.LoginTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		lctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return browser.New(s, bcfg, log).Login(lctx)
+	}
+
+	mgr := loginsvc.NewManager(loginFn, 0, log)
+	srv := grpclogin.NewLoginServiceServer(mgr, log)
+
+	log.Info("login-service: starting gRPC", "addr", cfg.LoginGRPCAddr)
+	if err := grpclogin.ListenAndServe(cfg.LoginGRPCAddr, srv, log); err != nil {
+		log.Error("LoginService stopped", "err", err)
+		os.Exit(1)
+	}
 }
 
 // runLogin executes a single headless jus.br login using the configured Signer

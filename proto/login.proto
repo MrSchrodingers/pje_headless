@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package login;
+
+option go_package = "github.com/MrSchrodingers/pje_headless/internal/loginpb";
+
+// LoginService returns a valid jus.br bearer token with session reuse.
+// A headless login runs only when no fresh cached token is available
+// (or force=true). Concurrent GetBearer calls coalesce into a single login.
+//
+// SECURITY: transport is plain TCP by default, acceptable only on loopback
+// or a trusted LAN segment - identical posture to SignerService (signer.proto).
+// The bearer returned is a credential.  Do NOT expose this port on an
+// untrusted network without TLS.  mTLS hardening is tracked as a backlog item.
+service LoginService {
+  // GetBearer returns a valid bearer, performing a headless login only if no
+  // fresh cached token exists (or force=true). Concurrent calls coalesce into a
+  // single login.
+  rpc GetBearer(GetBearerRequest) returns (BearerReply);
+
+  // Health reports liveness and whether a (non-expired) bearer is cached.
+  rpc Health(Empty) returns (HealthStatus);
+}
+
+message Empty {}
+
+message GetBearerRequest {
+  bool force = 1;
+}
+
+message BearerReply {
+  string bearer          = 1; // full Authorization value verbatim ("bearer eyJ...")
+  int64  expires_at_unix = 2; // JWT exp; 0 when unknown
+  bool   from_cache      = 3; // true when served without a new login
+}
+
+message HealthStatus {
+  bool  has_bearer      = 1;
+  int64 expires_at_unix = 2;
+}

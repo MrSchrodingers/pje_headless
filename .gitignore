@@ -1,5 +1,6 @@
 build/
 bin/
+/pjeheadless
 certificate/**.pfx
 pjeoffice_headless.egg-info
 

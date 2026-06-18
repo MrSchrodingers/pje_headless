@@ -28,6 +28,19 @@ type Config struct {
 	// Used when Mode == "signer-only".
 	// SECURITY: bind only to loopback or a trusted LAN interface.
 	GRPCAddr string // env PJE_GRPC_ADDR, default ":9090"
+
+	// LoginGRPCAddr is the bind address for the LoginService gRPC server.
+	// Used when Mode == "login-service".
+	// SECURITY: the LoginService returns a BEARER (a reusable credential) over
+	// plain TCP with no per-call authentication, so it defaults to loopback
+	// ("127.0.0.1:9091") -- fail-safe: it is NOT reachable off-host unless the
+	// operator opts in. To serve a consumer on another host, set
+	// PJE_LOGIN_GRPC_ADDR to a trusted-LAN interface explicitly; that exposes the
+	// credential on the wire, so confine it to a trusted segment (mTLS is a
+	// tracked backlog item). This mirrors BindAddr's loopback default rather than
+	// the SignerService's all-interfaces default, which exists only because the
+	// token host must serve a remote signer across the LAN by necessity.
+	LoginGRPCAddr string // env PJE_LOGIN_GRPC_ADDR, default "127.0.0.1:9091"
 }
 
 func FromEnv() Config {
@@ -45,6 +58,7 @@ func FromEnv() Config {
 		ChainDir:         os.Getenv("PJE_CHAIN_DIR"),
 		SignerRemoteAddr: os.Getenv("PJE_SIGNER_REMOTE_ADDR"),
 		GRPCAddr:         envOr("PJE_GRPC_ADDR", ":9090"),
+		LoginGRPCAddr:    envOr("PJE_LOGIN_GRPC_ADDR", "127.0.0.1:9091"),
 	}
 }
 
