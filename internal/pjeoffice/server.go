@@ -1,5 +1,5 @@
 // Package pjeoffice implements the HTTP server that speaks the PJeOffice 1.0
-// protocol. It is a faithful port of pje_auth.py (Python reference implementation)
+// protocol. It is a faithful port of a Python reference implementation
 // to Go, consuming the signer.Signer interface instead of a PKCS12Token directly.
 package pjeoffice
 
@@ -27,11 +27,11 @@ const (
 )
 
 // gifOK is the 1x1 transparent GIF used as the success health/ack response.
-// Matches GIF_OK in pje_auth.py.
+// Matches GIF_OK in the Python reference.
 var gifOK = mustDecodeBase64("R0lGODlhAQABAPAAAP///wAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==")
 
 // gifErr is the 2x1 transparent GIF used as the error response.
-// Matches GIF_ERR in pje_auth.py.
+// Matches GIF_ERR in the Python reference.
 var gifErr = mustDecodeBase64("R0lGODlhAgABAPAAAP///wAAACH5BAAAAAAALAAAAAACAAEAAAICRAEAOw==")
 
 func mustDecodeBase64(s string) []byte {
@@ -155,7 +155,7 @@ func (srv *Server) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleOptions mirrors do_OPTIONS in pje_auth.py.
+// handleOptions mirrors do_OPTIONS in the Python reference.
 func (srv *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
 	srv.applyCORS(w, r)
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -169,7 +169,7 @@ func (srv *Server) handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleGET mirrors do_GET for /pjeOffice/requisicao/ in pje_auth.py.
+// handleGET mirrors do_GET for /pjeOffice/requisicao/ in the Python reference.
 // The payload is received as ?r=<url-encoded JSON>.
 func (srv *Server) handleGET(w http.ResponseWriter, r *http.Request) {
 	srv.applyCORS(w, r)
@@ -201,7 +201,7 @@ func (srv *Server) handleGET(w http.ResponseWriter, r *http.Request) {
 	writeGIF(w, gifOK)
 }
 
-// handlePOST mirrors do_POST in pje_auth.py.
+// handlePOST mirrors do_POST in the Python reference.
 // The payload is received as a JSON body.
 func (srv *Server) handlePOST(w http.ResponseWriter, r *http.Request) {
 	srv.applyCORS(w, r)
@@ -244,10 +244,10 @@ type task struct {
 	AlgoritmoAssinatura string `json:"algoritmoAssinatura"`
 }
 
-// successCodes mirrors SUCCESS_CODES in pje_auth.py.
+// successCodes mirrors SUCCESS_CODES in the Python reference.
 var successCodes = map[int]bool{200: true, 201: true, 202: true, 204: true, 302: true, 304: true}
 
-// process is the faithful Go port of Authenticator.process() in pje_auth.py.
+// process is the faithful Go port of Authenticator.process() in the Python reference.
 // It:
 //  1. Parses the outer envelope and inner task.
 //  2. Calls signer.Login -> signer.Sign -> signer.CertChainPKIPath.
@@ -350,7 +350,7 @@ func (srv *Server) process(ctx context.Context, raw map[string]any) error {
 }
 
 // applyCORS writes the CORS headers expected by the PJeOffice protocol.
-// Mirrors _cors() in pje_auth.py.
+// Mirrors _cors() in the Python reference.
 func (srv *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -363,7 +363,7 @@ func (srv *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 	h.Set("Vary", "Origin")
 }
 
-// writeGIF writes a GIF response with the no-cache headers used by pje_auth.py.
+// writeGIF writes a GIF response with the no-cache headers used by the Python reference.
 func writeGIF(w http.ResponseWriter, blob []byte) {
 	h := w.Header()
 	h.Set("Content-Type", "image/gif")
